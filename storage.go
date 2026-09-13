@@ -213,7 +213,26 @@ func (s *store) deleteDB(name string) (deleteErr error) {
 	return nil
 }
 
-func (s *store) createDoc(database, id string, json []byte) (rev revision, createErr error) {
+func (s *store) createDoc(database string, json []byte) (string, revision, error) {
+	for {
+		id, err := makeID()
+		if err != nil {
+			return "", revision{}, err
+		}
+
+		rev, err := s.createDocWithID(database, id, json)
+		if errors.Is(err, errDocExists) {
+			continue
+		}
+		if err != nil {
+			return "", revision{}, err
+		}
+
+		return id, rev, nil
+	}
+}
+
+func (s *store) createDocWithID(database, id string, json []byte) (rev revision, createErr error) {
 	dbMu := s.dbLock(database)
 	dbMu.RLock()
 	defer dbMu.RUnlock()

@@ -97,21 +97,24 @@ func TestStoreDocuments(t *testing.T) {
 	}
 
 	body := []byte(`{"name":"first"}`)
-	rev, err := store.createDoc("db", "01950000-0000-7000-8000-000000000001", body)
+	id, rev, err := store.createDoc("db", body)
 	if err != nil {
 		t.Fatalf("createDoc() error = %v", err)
+	}
+	if err := validateID(id); err != nil {
+		t.Errorf("createDoc() ID = %q: %v", id, err)
 	}
 	if rev == (revision{}) {
 		t.Error("createDoc() revision is zero")
 	}
-	if _, err := store.createDoc("missing", "id", body); !errors.Is(err, errDBNotFound) {
+	if _, _, err := store.createDoc("missing", body); !errors.Is(err, errDBNotFound) {
 		t.Fatalf("createDoc() error = %v, want %v", err, errDBNotFound)
 	}
-	if _, err := store.createDoc("db", "01950000-0000-7000-8000-000000000001", body); !errors.Is(err, errDocExists) {
-		t.Fatalf("createDoc() error = %v, want %v", err, errDocExists)
+	if _, err := store.createDocWithID("db", id, body); !errors.Is(err, errDocExists) {
+		t.Fatalf("createDocWithID() error = %v, want %v", err, errDocExists)
 	}
 
-	doc, err := store.getDoc("db", "01950000-0000-7000-8000-000000000001")
+	doc, err := store.getDoc("db", id)
 	if err != nil {
 		t.Fatalf("getDoc() error = %v", err)
 	}
@@ -123,14 +126,14 @@ func TestStoreDocuments(t *testing.T) {
 	}
 
 	replacement := []byte(`{"name":"second"}`)
-	newRev, err := store.replaceDoc("db", "01950000-0000-7000-8000-000000000001", replacement, matchCond{})
+	newRev, err := store.replaceDoc("db", id, replacement, matchCond{})
 	if err != nil {
 		t.Fatalf("replaceDoc() error = %v", err)
 	}
 	if newRev == rev {
 		t.Error("replaceDoc() did not change revision")
 	}
-	doc, err = store.getDoc("db", "01950000-0000-7000-8000-000000000001")
+	doc, err = store.getDoc("db", id)
 	if err != nil {
 		t.Fatalf("getDoc() after replace error = %v", err)
 	}
@@ -138,13 +141,13 @@ func TestStoreDocuments(t *testing.T) {
 		t.Errorf("getDoc() JSON = %s, want %s", doc.json, replacement)
 	}
 
-	if err := store.deleteDoc("db", "01950000-0000-7000-8000-000000000001", matchCond{}); err != nil {
+	if err := store.deleteDoc("db", id, matchCond{}); err != nil {
 		t.Fatalf("deleteDoc() error = %v", err)
 	}
-	if _, err := store.getDoc("db", "01950000-0000-7000-8000-000000000001"); !errors.Is(err, errDocNotFound) {
+	if _, err := store.getDoc("db", id); !errors.Is(err, errDocNotFound) {
 		t.Fatalf("getDoc() error = %v, want %v", err, errDocNotFound)
 	}
-	if err := store.deleteDoc("db", "01950000-0000-7000-8000-000000000001", matchCond{}); !errors.Is(err, errDocNotFound) {
+	if err := store.deleteDoc("db", id, matchCond{}); !errors.Is(err, errDocNotFound) {
 		t.Fatalf("deleteDoc() error = %v, want %v", err, errDocNotFound)
 	}
 }
@@ -158,7 +161,7 @@ func TestStoredDocumentsAreEncrypted(t *testing.T) {
 	}
 	id := "01950000-0000-7000-8000-000000000001"
 	body := []byte(`{"secret":"unique-plaintext-marker"}`)
-	if _, err := store.createDoc("db", id, body); err != nil {
+	if _, err := store.createDocWithID("db", id, body); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 
@@ -210,7 +213,7 @@ func TestDocumentWritesUseFreshNonces(t *testing.T) {
 	}
 	id := "01950000-0000-7000-8000-000000000001"
 	body := []byte(`{"same":true}`)
-	if _, err := store.createDoc("db", id, body); err != nil {
+	if _, err := store.createDocWithID("db", id, body); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 	first := readValue(t, store.db, docKey("db", id))
@@ -254,11 +257,11 @@ func TestStoreListsDocuments(t *testing.T) {
 		"01950000-0000-7000-8000-000000000002",
 	}
 	for _, id := range ids {
-		if _, err := store.createDoc("db", id, []byte(`{"ok":true}`)); err != nil {
+		if _, err := store.createDocWithID("db", id, []byte(`{"ok":true}`)); err != nil {
 			t.Fatalf("createDoc(%q) error = %v", id, err)
 		}
 	}
-	if _, err := store.createDoc("other", "01950000-0000-7000-8000-000000000000", []byte(`{}`)); err != nil {
+	if _, err := store.createDocWithID("other", "01950000-0000-7000-8000-000000000000", []byte(`{}`)); err != nil {
 		t.Fatalf("createDoc(other) error = %v", err)
 	}
 
@@ -308,7 +311,7 @@ func TestDeleteDBDeletesOwnDocuments(t *testing.T) {
 		if err := store.createDB(name); err != nil {
 			t.Fatalf("createDB(%q) error = %v", name, err)
 		}
-		if _, err := store.createDoc(name, "id", []byte(`{"ok":true}`)); err != nil {
+		if _, err := store.createDocWithID(name, "id", []byte(`{"ok":true}`)); err != nil {
 			t.Fatalf("createDoc(%q) error = %v", name, err)
 		}
 	}
@@ -335,7 +338,7 @@ func TestStorePersists(t *testing.T) {
 	if err := store.createDB("db"); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	rev, err := store.createDoc("db", "id", []byte(`{"saved":true}`))
+	rev, err := store.createDocWithID("db", "id", []byte(`{"saved":true}`))
 	if err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
@@ -407,7 +410,7 @@ func TestConcurrentCreateDoc(t *testing.T) {
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
-			_, err := store.createDoc("db", "id", []byte(`{"ok":true}`))
+			_, err := store.createDocWithID("db", "id", []byte(`{"ok":true}`))
 			errs <- err
 		})
 	}
@@ -437,7 +440,7 @@ func TestConcurrentConditionalReplace(t *testing.T) {
 	if err := store.createDB("db"); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	rev, err := store.createDoc("db", "id", []byte(`{"value":0}`))
+	rev, err := store.createDocWithID("db", "id", []byte(`{"value":0}`))
 	if err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
@@ -482,7 +485,7 @@ func TestDistinctDocsDoNotBlock(t *testing.T) {
 	if err := store.createDB("db", indexDef{name: "name", path: "/name"}); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	if _, err := store.createDoc("db", heldID, []byte(`{"name":"old"}`)); err != nil {
+	if _, err := store.createDocWithID("db", heldID, []byte(`{"name":"old"}`)); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 	if store.docLock("db", heldID) == store.docLock("db", otherID) {
@@ -505,7 +508,7 @@ func TestDistinctDocsDoNotBlock(t *testing.T) {
 
 	created := make(chan error, 1)
 	go func() {
-		_, err := store.createDoc("db", otherID, []byte(`{"name":"other"}`))
+		_, err := store.createDocWithID("db", otherID, []byte(`{"name":"other"}`))
 		created <- err
 	}()
 
@@ -535,7 +538,7 @@ func TestDeleteDBRacesWithWrites(t *testing.T) {
 			t.Fatalf("createDB() error = %v", err)
 		}
 		for _, id := range []string{"replace", "patch", "delete"} {
-			if _, err := store.createDoc("db", id, []byte(`{"name":"old"}`)); err != nil {
+			if _, err := store.createDocWithID("db", id, []byte(`{"name":"old"}`)); err != nil {
 				t.Fatalf("createDoc(%q) error = %v", id, err)
 			}
 		}
@@ -561,7 +564,7 @@ func TestDeleteDBRacesWithWrites(t *testing.T) {
 		})
 		wg.Go(func() {
 			<-start
-			_, err := store.createDoc("db", "create", []byte(`{"name":"new"}`))
+			_, err := store.createDocWithID("db", "create", []byte(`{"name":"new"}`))
 			errs <- err
 		})
 		wg.Go(func() {
@@ -607,7 +610,7 @@ func TestStoreAuthenticatesDatabaseRecords(t *testing.T) {
 	if err := store.createDB("db"); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	if _, err := store.createDoc("db", "id", []byte(`{"ok":true}`)); err != nil {
+	if _, err := store.createDocWithID("db", "id", []byte(`{"ok":true}`)); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 
@@ -641,7 +644,7 @@ func TestStoreRejectsCorruption(t *testing.T) {
 	if _, err := store.listDBs(100, ""); err == nil {
 		t.Fatal("listDBs() error = nil, want corruption error")
 	}
-	if _, err := store.createDoc("bad", "id", []byte(`{}`)); err == nil {
+	if _, err := store.createDocWithID("bad", "id", []byte(`{}`)); err == nil {
 		t.Fatal("createDoc() error = nil, want corruption error")
 	}
 

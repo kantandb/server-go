@@ -137,7 +137,7 @@ func TestPathQueryScanLimits(t *testing.T) {
 		t.Fatalf("createDB() error = %v", err)
 	}
 	for _, id := range []string{indexTestIDA, indexTestIDB} {
-		if _, err := store.createDoc("users", id, []byte(`{"age":10}`)); err != nil {
+		if _, err := store.createDocWithID("users", id, []byte(`{"age":10}`)); err != nil {
 			t.Fatalf("createDoc() error = %v", err)
 		}
 	}

@@ -277,11 +277,11 @@ func TestStoreIndexesDocuments(t *testing.T) {
 		indexTestIDB: `{"email":"alice@example.com","active":true,"profile":{"a/b~c":"yes"}}`,
 	}
 	for id, document := range documents {
-		if _, err := store.createDoc("users", id, []byte(document)); err != nil {
+		if _, err := store.createDocWithID("users", id, []byte(document)); err != nil {
 			t.Fatalf("createDoc(%q) error = %v", id, err)
 		}
 	}
-	if _, err := store.createDoc("other", indexTestIDZ, []byte(`{"email":"alice@example.com"}`)); err != nil {
+	if _, err := store.createDocWithID("other", indexTestIDZ, []byte(`{"email":"alice@example.com"}`)); err != nil {
 		t.Fatalf("createDoc(other) error = %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestStoreRangeQueries(t *testing.T) {
 		indexTestIDH: `{"value":[1]}`,
 	}
 	for id, document := range documents {
-		if _, err := store.createDoc("db", id, []byte(document)); err != nil {
+		if _, err := store.createDocWithID("db", id, []byte(document)); err != nil {
 			t.Fatalf("createDoc(%q) error = %v", id, err)
 		}
 	}
@@ -428,7 +428,7 @@ func TestStoreRangeQueries(t *testing.T) {
 	if err := store.deleteDoc("db", indexTestIDB, matchCond{set: true, revision: doc.revision}); err != nil {
 		t.Fatalf("deleteDoc() error = %v", err)
 	}
-	if _, err := store.createDoc("db", indexTestIDB, []byte(`{"value":2}`)); err != nil {
+	if _, err := store.createDocWithID("db", indexTestIDB, []byte(`{"value":2}`)); err != nil {
 		t.Fatalf("createDoc(reused cursor ID) error = %v", err)
 	}
 	page, err = store.queryRangePage(context.Background(), "db", "value", cmpGE, one, 100, page.lastValue, indexTestIDB)
@@ -486,7 +486,7 @@ func TestStoreQueryCancellation(t *testing.T) {
 	if err := store.createDB("db", indexDef{name: "value", path: "/value"}); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	if _, err := store.createDoc("db", indexTestIDA, []byte(`{"value":1}`)); err != nil {
+	if _, err := store.createDocWithID("db", indexTestIDA, []byte(`{"value":1}`)); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 	encoded, err := encodeIndexValue(json.Number("0"))
@@ -547,7 +547,7 @@ func TestStoreRejectsLargeIndexedValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	if _, err := store.createDoc("db", "id", body); !errors.Is(err, errInvalidIndexValue) {
+	if _, err := store.createDocWithID("db", "id", body); !errors.Is(err, errInvalidIndexValue) {
 		t.Fatalf("createDoc() error = %v, want %v", err, errInvalidIndexValue)
 	}
 	if _, err := store.getDoc("db", "id"); !errors.Is(err, errDocNotFound) {
@@ -563,7 +563,7 @@ func TestStoreMaintainsIndexes(t *testing.T) {
 		t.Fatalf("createDB() error = %v", err)
 	}
 
-	rev, err := store.createDoc("db", indexTestIDA, []byte(`{"name":"first"}`))
+	rev, err := store.createDocWithID("db", indexTestIDA, []byte(`{"name":"first"}`))
 	if err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
@@ -611,7 +611,7 @@ func TestStorePersistsIndexes(t *testing.T) {
 	if err := store.createDB("db", indexDef{name: "number", path: "/number"}); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	if _, err := store.createDoc("db", indexTestIDA, []byte(`{"number":1.0}`)); err != nil {
+	if _, err := store.createDocWithID("db", indexTestIDA, []byte(`{"number":1.0}`)); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 	if err := store.close(); err != nil {
@@ -645,7 +645,7 @@ func TestDeleteDBDeletesIndexes(t *testing.T) {
 	if err := store.createDB("db", indexDef{name: "name", path: "/name"}); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	if _, err := store.createDoc("db", "id", []byte(`{"name":"value"}`)); err != nil {
+	if _, err := store.createDocWithID("db", "id", []byte(`{"name":"value"}`)); err != nil {
 		t.Fatalf("createDoc() error = %v", err)
 	}
 	if err := store.deleteDB("db"); err != nil {

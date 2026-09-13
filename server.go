@@ -760,13 +760,7 @@ func (a *api) createDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := makeID()
-	if err != nil {
-		a.fail(w, r, "generate document ID", err)
-
-		return
-	}
-	rev, err := a.store.createDoc(database, id, document)
+	id, rev, err := a.store.createDoc(database, document)
 	if errors.Is(err, errDBNotFound) {
 		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
