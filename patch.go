@@ -44,8 +44,7 @@ func applyPatch(document, body []byte, mediaType string, maxBytes int64) ([]byte
 		return nil, errInvalidPatch
 	}
 	if err != nil {
-		var sizeErr *jsonpatch.AccumulatedCopySizeError
-		if errors.As(err, &sizeErr) {
+		if _, ok := errors.AsType[*jsonpatch.AccumulatedCopySizeError](err); ok {
 			return nil, errBodyTooLarge
 		}
 

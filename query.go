@@ -259,7 +259,7 @@ func safePath(path string) bool {
 }
 
 func jsonPathPointer(path *jsonpath.Path) (string, bool) {
-	var pointer string
+	var pointer strings.Builder
 	for _, segment := range path.Query().Segments() {
 		selectors := segment.Selectors()
 		if segment.IsDescendant() || len(selectors) != 1 {
@@ -274,7 +274,8 @@ func jsonPathPointer(path *jsonpath.Path) (string, bool) {
 			}
 			name = strings.ReplaceAll(name, "~", "~0")
 			name = strings.ReplaceAll(name, "/", "~1")
-			pointer += "/" + name
+			pointer.WriteByte('/')
+			pointer.WriteString(name)
 		case spec.Index:
 			return "", false
 		default:
@@ -282,7 +283,9 @@ func jsonPathPointer(path *jsonpath.Path) (string, bool) {
 		}
 	}
 
-	return pointer, pointer != ""
+	result := pointer.String()
+
+	return result, result != ""
 }
 
 func (s *store) queryPathDocs(ctx context.Context, database string, path *jsonpath.Path, op cmpOp, value any, limit, maxWork int, afterID string) (page pathPage, queryErr error) {

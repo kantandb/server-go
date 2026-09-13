@@ -196,7 +196,7 @@ func rejectUncleanPath(next http.Handler) http.Handler {
 
 			return
 		}
-		for _, part := range strings.Split(r.URL.Path, "/") {
+		for part := range strings.SplitSeq(r.URL.Path, "/") {
 			if part == "." || part == ".." {
 				notFound(w, r)
 
