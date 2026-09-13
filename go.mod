@@ -1,4 +1,4 @@
-module github.com/kantandb/prototype
+module github.com/kantandb/server-go
 
 go 1.26.0
 

@@ -1,4 +1,4 @@
-# KantanDB prototype
+# KantanDB server
 
 KantanDB is an encrypted JSON document database with secondary indexes and
 JSONPath queries over HTTP.
