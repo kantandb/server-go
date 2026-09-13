@@ -33,6 +33,40 @@ func TestWelcome(t *testing.T) {
 	}
 }
 
+func TestResponseWriters(t *testing.T) {
+	t.Parallel()
+
+	t.Run("JSON", func(t *testing.T) {
+		res := httptest.NewRecorder()
+		writeJSON(res, http.StatusCreated, serviceInfo{Name: "KantanDB", Version: "test"})
+
+		if res.Code != http.StatusCreated {
+			t.Errorf("status = %d, want %d", res.Code, http.StatusCreated)
+		}
+		if got := res.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+			t.Errorf("Content-Type = %q, want application/json; charset=utf-8", got)
+		}
+		if got := res.Body.String(); got != `{"name":"KantanDB","version":"test"}` {
+			t.Errorf("body = %q", got)
+		}
+	})
+
+	t.Run("data", func(t *testing.T) {
+		res := httptest.NewRecorder()
+		writeData(res, http.StatusOK, "application/json", []byte(`{"ok":true}`))
+
+		if res.Code != http.StatusOK {
+			t.Errorf("status = %d, want %d", res.Code, http.StatusOK)
+		}
+		if got := res.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if got := res.Body.String(); got != `{"ok":true}` {
+			t.Errorf("body = %q", got)
+		}
+	})
+}
+
 func TestHealth(t *testing.T) {
 	t.Parallel()
 

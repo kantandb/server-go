@@ -101,6 +101,27 @@ type errorBody struct {
 	Message string `json:"message"`
 }
 
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		panic(fmt.Errorf("encoding response: %w", err))
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
+		panic(fmt.Errorf("writing response: %w", err))
+	}
+}
+
+func writeData(w http.ResponseWriter, status int, contentType string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	if _, err := w.Write(body); err != nil {
+		panic(fmt.Errorf("writing response: %w", err))
+	}
+}
+
 func newHandler(store *store, maxBodyBytes int64) http.Handler {
 	return newAPI(store, maxBodyBytes, slog.New(slog.DiscardHandler)).handler()
 }
