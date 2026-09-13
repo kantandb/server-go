@@ -65,11 +65,11 @@ func TestReadBulk(t *testing.T) {
 				t.Errorf("readBulk() = %q, want %q", got, tt.want)
 			}
 
-			var lineErr *bulkLineError
-			if errors.As(err, &lineErr) && lineErr.line != tt.wantLine {
+			lineErr, hasLine := errors.AsType[*bulkLineError](err)
+			if hasLine && lineErr.line != tt.wantLine {
 				t.Errorf("error line = %d, want %d", lineErr.line, tt.wantLine)
 			}
-			if tt.wantLine != 0 && !errors.As(err, &lineErr) {
+			if tt.wantLine != 0 && !hasLine {
 				t.Errorf("error has no line, want %d", tt.wantLine)
 			}
 		})

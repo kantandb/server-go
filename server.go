@@ -174,8 +174,10 @@ func (a *api) handler() http.Handler {
 	route(mux, http.MethodPut, "/db/{database}/{id}", a.replaceDoc)
 	route(mux, http.MethodPatch, "/db/{database}/{id}", a.patchDoc)
 	route(mux, http.MethodDelete, "/db/{database}/{id}", a.deleteDoc)
+	route(mux, http.MethodGet, "/bulk/{database}", a.exportBulk)
+	route(mux, http.MethodPost, "/bulk/{database}", a.importBulk)
 
-	for _, pattern := range []string{"/{$}", "/healthz", "/db", "/db/{database}", "/db/{database}/{id}"} {
+	for _, pattern := range []string{"/{$}", "/healthz", "/db", "/db/{database}", "/db/{database}/{id}", "/bulk/{database}"} {
 		mux.HandleFunc(pattern, methodNotAllowed)
 	}
 	mux.HandleFunc("/", notFound)
@@ -745,6 +747,125 @@ func (a *api) deleteDB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *api) exportBulk(w http.ResponseWriter, r *http.Request) {
+	ctx, done, ok := a.startBulk(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+
+	w.Header().Set("Content-Type", bulkMediaType)
+	w.Header().Set("Cache-Control", "no-store")
+	stream := newBulkStream(w)
+
+	err := a.store.exportDocs(ctx, r.PathValue("database"), stream.write)
+	if err != nil {
+		if stream.started {
+			a.log.Error("bulk export failed", "method", r.Method, "path", r.URL.Path, "error", err)
+		} else {
+			a.failBulk(w, r, "export documents", err)
+		}
+
+		return
+	}
+	if !stream.started {
+		w.WriteHeader(http.StatusOK)
+
+		return
+	}
+	if err := stream.flush(); err != nil {
+		a.log.Error("bulk export failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	}
+}
+
+func (a *api) importBulk(w http.ResponseWriter, r *http.Request) {
+	if !isNDJSON(r.Header.Get("Content-Type")) {
+		writeBulkError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/x-ndjson", 0)
+
+		return
+	}
+
+	ctx, done, ok := a.startBulk(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+
+	documents, err := readBulkCtx(ctx, r.Body, a.maxBodyBytes, a.bulk.maxBytes, a.bulk.maxDocuments)
+	if err != nil {
+		a.failBulk(w, r, "read bulk import", err)
+
+		return
+	}
+
+	if _, err := a.store.importDocs(ctx, r.PathValue("database"), documents, a.bulk.maxBatchBytes); err != nil {
+		a.failBulk(w, r, "import documents", err)
+
+		return
+	}
+
+	writeBulkSuccess(w)
+}
+
+func (a *api) startBulk(w http.ResponseWriter, r *http.Request) (context.Context, func(), bool) {
+	if err := validateName(r.PathValue("database")); err != nil {
+		writeBulkError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid", 0)
+
+		return nil, nil, false
+	}
+	if r.URL.RawQuery != "" {
+		writeBulkError(w, http.StatusBadRequest, "invalid_query", "URI query parameters are not supported", 0)
+
+		return nil, nil, false
+	}
+	if !a.takeBulkSlot() {
+		a.log.Warn("bulk request rejected", "method", r.Method, "path", r.URL.Path)
+		writeBulkError(w, http.StatusTooManyRequests, "bulk_limit", "Too many bulk requests", 0)
+
+		return nil, nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), a.bulk.timeout)
+	done := func() {
+		cancel()
+		a.freeBulkSlot()
+	}
+
+	return ctx, done, true
+}
+
+func (a *api) failBulk(w http.ResponseWriter, r *http.Request, operation string, err error) {
+	a.log.Error("request failed", "operation", operation, "method", r.Method, "path", r.URL.Path, "error", err)
+
+	line := 0
+	if lineErr, ok := errors.AsType[*bulkLineError](err); ok {
+		line = lineErr.line
+	}
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		writeBulkError(w, http.StatusServiceUnavailable, "bulk_timeout", "Bulk request exceeded the execution limit", line)
+	case errors.Is(err, errBulkLimit), errors.Is(err, errBodyTooLarge):
+		writeBulkError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Bulk import exceeds a size or count limit", line)
+	case errors.Is(err, errBulkEmpty):
+		writeBulkError(w, http.StatusBadRequest, "invalid_document", "Import must contain a document", line)
+	case errors.Is(err, errInvalidDoc):
+		writeBulkError(w, http.StatusBadRequest, "invalid_document", "Document must be a JSON object", line)
+	case errors.Is(err, errInvalidIndexValue):
+		writeBulkError(w, http.StatusBadRequest, "invalid_document", "An indexed value exceeds the size limit", line)
+	case errors.Is(err, errBulkRead):
+		writeBulkError(w, http.StatusBadRequest, "invalid_document", "Could not read import", line)
+	case errors.Is(err, errDBNotFound):
+		writeBulkError(w, http.StatusNotFound, "database_not_found", "Database does not exist", line)
+	case errors.Is(err, errCorruptData):
+		writeBulkError(w, http.StatusInternalServerError, "corrupt_data", "Stored data is corrupt", line)
+	case isStoreUnavailable(err):
+		writeBulkError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable", line)
+	default:
+		writeBulkError(w, http.StatusInternalServerError, "internal_error", "Internal server error", line)
+	}
 }
 
 func (a *api) createDoc(w http.ResponseWriter, r *http.Request) {

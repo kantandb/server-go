@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,11 +11,15 @@ import (
 	"net/http"
 )
 
-const bulkMediaType = "application/x-ndjson"
+const (
+	bulkMediaType  = "application/x-ndjson"
+	bulkBufferSize = 32 << 10
+)
 
 var (
 	errBulkEmpty = errors.New("bulk import is empty")
 	errBulkLimit = errors.New("bulk import limit exceeded")
+	errBulkRead  = errors.New("could not read bulk import")
 )
 
 type bulkLineError struct {
@@ -48,7 +53,11 @@ func isNDJSON(value string) bool {
 }
 
 func readBulk(reader io.Reader, maxLine, maxBytes int64, maxDocs int) ([][]byte, error) {
-	buffered := bufio.NewReader(reader)
+	return readBulkCtx(context.Background(), reader, maxLine, maxBytes, maxDocs)
+}
+
+func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64, maxDocs int) ([][]byte, error) {
+	buffered := bufio.NewReader(contextReader{ctx: ctx, reader: reader})
 	var documents [][]byte
 	var line []byte
 	var total int64
@@ -70,7 +79,7 @@ func readBulk(reader io.Reader, maxLine, maxBytes int64, maxDocs int) ([][]byte,
 			continue
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("reading bulk import: %w", err)
+			return nil, fmt.Errorf("%w: %w", errBulkRead, err)
 		}
 		if errors.Is(err, io.EOF) && len(line) == 0 {
 			break
@@ -104,6 +113,19 @@ func readBulk(reader io.Reader, maxLine, maxBytes int64, maxDocs int) ([][]byte,
 	return documents, nil
 }
 
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return r.reader.Read(buffer)
+}
+
 func lineLen(line []byte, complete bool) int {
 	length := len(line)
 	if complete && length > 0 && line[length-1] == '\n' {
@@ -125,6 +147,47 @@ func trimLineEnd(line []byte, complete bool) []byte {
 	line = bytes.TrimSuffix(line, []byte{'\r'})
 
 	return line
+}
+
+type bulkStream struct {
+	writer   http.ResponseWriter
+	buffered *bufio.Writer
+	pending  int
+	started  bool
+}
+
+func newBulkStream(writer http.ResponseWriter) *bulkStream {
+	return &bulkStream{writer: writer, buffered: bufio.NewWriterSize(writer, bulkBufferSize)}
+}
+
+func (s *bulkStream) write(document []byte) error {
+	if !s.started {
+		s.writer.WriteHeader(http.StatusOK)
+		s.started = true
+	}
+
+	if _, err := s.buffered.Write(document); err != nil {
+		return err
+	}
+	if err := s.buffered.WriteByte('\n'); err != nil {
+		return err
+	}
+
+	s.pending += len(document) + 1
+	if s.pending < bulkBufferSize {
+		return nil
+	}
+
+	return s.flush()
+}
+
+func (s *bulkStream) flush() error {
+	if err := s.buffered.Flush(); err != nil {
+		return err
+	}
+	s.pending = 0
+
+	return http.NewResponseController(s.writer).Flush()
 }
 
 func writeBulkSuccess(w http.ResponseWriter) {
