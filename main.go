@@ -49,7 +49,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger) (runErr error) {
 		}
 	}()
 
-	api := newAPI(store, cfg.maxBodyBytes, log)
+	api := newAPIWithBulk(store, cfg.maxBodyBytes, cfg.bulk, log)
 	srv := &http.Server{
 		Addr:              cfg.addr,
 		Handler:           api.handler(),
@@ -62,7 +62,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger) (runErr error) {
 		errCh <- srv.ListenAndServe()
 	}()
 
-	log.Info("server started", "address", cfg.addr, "data_path", cfg.dataPath, "max_body_bytes", cfg.maxBodyBytes, "version", buildVersion)
+	log.Info("server started", "address", cfg.addr, "data_path", cfg.dataPath, "max_body_bytes", cfg.maxBodyBytes,
+		"bulk_max_bytes", cfg.bulk.maxBytes, "bulk_max_documents", cfg.bulk.maxDocuments,
+		"bulk_max_batch_bytes", cfg.bulk.maxBatchBytes, "bulk_timeout", cfg.bulk.timeout,
+		"bulk_concurrency", cfg.bulk.concurrency, "version", buildVersion)
 
 	select {
 	case err := <-errCh:

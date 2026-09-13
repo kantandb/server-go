@@ -18,6 +18,7 @@ func TestRunStopsWithContext(t *testing.T) {
 		dataPath:     t.TempDir(),
 		keyFile:      writeTestKey(t),
 		maxBodyBytes: defaultMaxBodyBytes,
+		bulk:         defaultBulkConfig(),
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 

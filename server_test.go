@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -65,6 +66,24 @@ func TestResponseWriters(t *testing.T) {
 			t.Errorf("body = %q", got)
 		}
 	})
+}
+
+func TestBulkSlots(t *testing.T) {
+	t.Parallel()
+
+	a := newAPIWithBulk(nil, defaultMaxBodyBytes, bulkConfig{concurrency: 1}, slog.New(slog.DiscardHandler))
+	if !a.takeBulkSlot() {
+		t.Fatal("first bulk slot was unavailable")
+	}
+	if a.takeBulkSlot() {
+		t.Fatal("bulk concurrency limit was not enforced")
+	}
+
+	a.freeBulkSlot()
+	if !a.takeBulkSlot() {
+		t.Fatal("released bulk slot remained unavailable")
+	}
+	a.freeBulkSlot()
 }
 
 func TestHealth(t *testing.T) {

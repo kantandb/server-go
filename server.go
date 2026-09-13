@@ -22,6 +22,8 @@ import (
 type api struct {
 	store        *store
 	maxBodyBytes int64
+	bulk         bulkConfig
+	bulkSlots    chan struct{}
 	log          *slog.Logger
 	stopping     atomic.Bool
 }
@@ -125,7 +127,30 @@ func newHandler(store *store, maxBodyBytes int64) http.Handler {
 }
 
 func newAPI(store *store, maxBodyBytes int64, log *slog.Logger) *api {
-	return &api{store: store, maxBodyBytes: maxBodyBytes, log: log}
+	return newAPIWithBulk(store, maxBodyBytes, defaultBulkConfig(), log)
+}
+
+func newAPIWithBulk(store *store, maxBodyBytes int64, bulk bulkConfig, log *slog.Logger) *api {
+	return &api{
+		store:        store,
+		maxBodyBytes: maxBodyBytes,
+		bulk:         bulk,
+		bulkSlots:    make(chan struct{}, bulk.concurrency),
+		log:          log,
+	}
+}
+
+func (a *api) takeBulkSlot() bool {
+	select {
+	case a.bulkSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *api) freeBulkSlot() {
+	<-a.bulkSlots
 }
 
 const (
