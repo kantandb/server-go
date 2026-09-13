@@ -14,6 +14,7 @@ tags:
   - name: Service
   - name: Databases
   - name: Documents
+  - name: Bulk
 paths:
   /healthz:
     get:
@@ -294,6 +295,88 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
+
+  /bulk/{database}:
+    parameters:
+      - $ref: "#/components/parameters/Database"
+
+    get:
+      tags: [Bulk]
+      operationId: exportDocuments
+      summary: Export documents as NDJSON
+      description: |
+        Streams one snapshot in lexical source-ID order. Each line is a stored
+        JSON document without its ID, revision, or ETag. This is a logical
+        transfer, not a backup format. URI query parameters are rejected.
+      responses:
+        "200":
+          description: Canonical documents, one per line. An empty database returns an empty body.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: NDJSON containing one JSON object per line.
+              example: |
+                {"name":"Alice"}
+                {"name":"Bob"}
+        "400":
+          $ref: "#/components/responses/BulkBadRequest"
+        "404":
+          $ref: "#/components/responses/BulkNotFound"
+        "429":
+          $ref: "#/components/responses/BulkLimited"
+        "500":
+          $ref: "#/components/responses/BulkInternalError"
+        "503":
+          $ref: "#/components/responses/BulkUnavailable"
+
+    post:
+      tags: [Bulk]
+      operationId: importDocuments
+      summary: Import documents from NDJSON
+      description: |
+        Creates new IDs and revisions, applies current indexes, and commits all
+        documents in one synced Pebble batch. The default limits are 1 MiB per
+        document, 64 MiB total, 1,000 documents, a 128 MiB batch, 30 seconds,
+        and one concurrent bulk request. URI query parameters are rejected.
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              minLength: 1
+              description: NDJSON containing one JSON object per line.
+            example: |
+              {"name":"Alice"}
+              {"name":"Bob"}
+      responses:
+        "200":
+          description: Every document was imported.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResult"
+              example:
+                success: true
+                error: {}
+        "400":
+          $ref: "#/components/responses/BulkBadRequest"
+        "404":
+          $ref: "#/components/responses/BulkNotFound"
+        "413":
+          $ref: "#/components/responses/BulkTooLarge"
+        "415":
+          $ref: "#/components/responses/BulkUnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/BulkLimited"
+        "500":
+          $ref: "#/components/responses/BulkInternalError"
+        "503":
+          $ref: "#/components/responses/BulkUnavailable"
 
   /db/{database}/{id}:
     parameters:
@@ -585,6 +668,29 @@ components:
         value:
           description: Required by add, replace, and test.
 
+    BulkResult:
+      type: object
+      additionalProperties: false
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+        error:
+          $ref: "#/components/schemas/BulkError"
+
+    BulkError:
+      type: object
+      additionalProperties: false
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        line:
+          type: integer
+          minimum: 1
+          description: One-based failing input line, when known.
+        message:
+          type: string
+
     ErrorEnvelope:
       type: object
       additionalProperties: false
@@ -606,6 +712,8 @@ components:
     ErrorCode:
       type: string
       enum:
+        - bulk_limit
+        - bulk_timeout
         - content_too_large
         - corrupt_data
         - database_exists
@@ -751,6 +859,82 @@ components:
         const: no-store
 
   responses:
+    BulkBadRequest:
+      description: The database name, URI query, or input document is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+          example:
+            success: false
+            error:
+              code: invalid_document
+              line: 2
+              message: Document must be a JSON object
+
+    BulkNotFound:
+      description: The database does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+          example:
+            success: false
+            error:
+              code: database_not_found
+              message: Database does not exist
+
+    BulkTooLarge:
+      description: The import exceeds a size, count, or batch limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+          example:
+            success: false
+            error:
+              code: content_too_large
+              line: 1001
+              message: Bulk import exceeds a size or count limit
+
+    BulkUnsupportedMediaType:
+      description: Content-Type must be application/x-ndjson.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+          example:
+            success: false
+            error:
+              code: unsupported_media_type
+              message: Content-Type must be application/x-ndjson
+
+    BulkLimited:
+      description: The concurrent bulk request limit was reached.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+          example:
+            success: false
+            error:
+              code: bulk_limit
+              message: Too many bulk requests
+
+    BulkInternalError:
+      description: Stored data is corrupt or an unexpected server error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+
+    BulkUnavailable:
+      description: Storage is unavailable or the bulk deadline was exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BulkResult"
+
     BadRequest:
       description: The request is invalid.
       content:

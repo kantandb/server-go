@@ -84,6 +84,13 @@ echo '[{"op":"replace","path":"/name","value":"Patched"}]' | \
 # Delete a document if it exists.
 xh DELETE localhost:8080/db/example/01950000-0000-7000-8000-000000000001 If-Match:\*
 
+# Export documents as NDJSON.
+xh GET localhost:8080/bulk/example --download --output example.ndjson
+
+# Import them with new IDs and revisions.
+xh POST localhost:8080/bulk/target \
+  Content-Type:application/x-ndjson < example.ndjson
+
 # Delete a database.
 xh DELETE localhost:8080/db/example
 ```
@@ -113,3 +120,17 @@ per page and stops after five seconds.
 The request body is limited to 64 KiB and the path to 256 bytes. A path may have
 one descendant and one selector per segment. Evaluation visits at most 1,000,000
 JSON nodes per document.
+
+### Bulk transfer
+
+`GET /bulk/{database}` streams canonical documents as NDJSON from one Pebble
+snapshot. `POST /bulk/{database}` accepts that stream, assigns new UUIDv7 IDs
+and revisions, applies the target database's indexes, and commits it atomically.
+
+Defaults allow 1 MiB per document, 64 MiB and 1,000 documents per import, a
+128 MiB Pebble batch, 30 seconds, and one bulk request at a time. Configure them
+with the `-bulk-*` flags shown by `kantan -help`.
+
+Bulk transfer preserves document values only. It omits database and index
+definitions, IDs, revisions, ETags, and encryption keys, so it is not backup and
+restore.
