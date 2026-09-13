@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -294,6 +295,147 @@ func (s *store) createDocWithID(database, id string, json []byte) (rev revision,
 	return rev, nil
 }
 
+func (s *store) importDocs(ctx context.Context, database string, documents [][]byte, maxBatchBytes int) (ids []string, importErr error) {
+	dbMu := s.dbLock(database)
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+
+	databaseKey, err := s.databaseKey(database)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(databaseKey)
+
+	defs, err := s.indexes(database)
+	if err != nil {
+		return nil, err
+	}
+
+	var revisions []revision
+	var unlock func()
+	for {
+		ids, revisions, err = makeImportIDs(len(documents))
+		if err != nil {
+			return nil, err
+		}
+
+		unlock = s.lockDocs(database, ids)
+		collision, collisionErr := s.hasAnyDoc(database, ids)
+		if collisionErr != nil {
+			unlock()
+
+			return nil, collisionErr
+		}
+		if !collision {
+			break
+		}
+		unlock()
+	}
+	defer unlock()
+
+	batch := s.db.NewBatch()
+	defer func() {
+		if err := batch.Close(); err != nil {
+			importErr = errors.Join(importErr, wrapStore("closing bulk import batch", err))
+		}
+	}()
+
+	for i, document := range documents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		values, err := indexValues(document, defs)
+		if err != nil {
+			return nil, &bulkLineError{line: i + 1, err: err}
+		}
+
+		key := docKey(database, ids[i])
+		record, err := sealDoc(key, databaseKey, ids[i], revisions[i], document)
+		if err != nil {
+			return nil, fmt.Errorf("sealing imported document: %w", err)
+		}
+		if err := batch.Set(key, record, nil); err != nil {
+			return nil, wrapStore("queuing imported document", err)
+		}
+		if err := setIndexEntries(batch, database, ids[i], values); err != nil {
+			return nil, err
+		}
+		if batch.Len() > maxBatchBytes {
+			return nil, &bulkLineError{line: i + 1, err: errBulkLimit}
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return nil, wrapStore("committing bulk import", err)
+	}
+
+	return ids, nil
+}
+
+func makeImportIDs(count int) ([]string, []revision, error) {
+	ids := make([]string, 0, count)
+	revisions := make([]revision, 0, count)
+	seen := make(map[string]struct{}, count)
+
+	for len(ids) < count {
+		id, err := makeID()
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+
+		rev, err := makeRevision(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		revisions = append(revisions, rev)
+	}
+
+	return ids, revisions, nil
+}
+
+func (s *store) hasAnyDoc(database string, ids []string) (bool, error) {
+	for _, id := range ids {
+		exists, err := s.has(docKey(database, id))
+		if err != nil {
+			return false, fmt.Errorf("checking imported document: %w", err)
+		}
+		if exists {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (s *store) lockDocs(database string, ids []string) func() {
+	var stripes [docStripeCount]bool
+	for _, id := range ids {
+		stripes[s.docStripe(database, id)] = true
+	}
+	for stripe, lock := range stripes {
+		if lock {
+			s.docStripes[stripe].Lock()
+		}
+	}
+
+	return func() {
+		for stripe := len(stripes) - 1; stripe >= 0; stripe-- {
+			if stripes[stripe] {
+				s.docStripes[stripe].Unlock()
+			}
+		}
+	}
+}
+
 func (s *store) getDoc(database, id string) (storedDoc, error) {
 	dbMu := s.dbLock(database)
 	dbMu.RLock()
@@ -561,10 +703,14 @@ func (s *store) dbLock(database string) *sync.RWMutex {
 }
 
 func (s *store) docLock(database, id string) *sync.Mutex {
+	return &s.docStripes[s.docStripe(database, id)]
+}
+
+func (s *store) docStripe(database, id string) int {
 	hash := hashPart(fnvOffset, database)
 	hash = hashPart(hashPart(hash, "\x00"), id)
 
-	return &s.docStripes[hash&(docStripeCount-1)]
+	return int(hash & (docStripeCount - 1))
 }
 
 func hashPart(hash uint64, value string) uint64 {
