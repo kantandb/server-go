@@ -295,6 +295,63 @@ func (s *store) createDocWithID(database, id string, json []byte) (rev revision,
 	return rev, nil
 }
 
+func (s *store) exportDocs(ctx context.Context, database string, yield func([]byte) error) (exportErr error) {
+	dbMu := s.dbLock(database)
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+
+	databaseKey, err := s.databaseKey(database)
+	if err != nil {
+		return err
+	}
+	defer clear(databaseKey)
+
+	snapshot := s.db.NewSnapshot()
+	defer func() {
+		if err := snapshot.Close(); err != nil {
+			exportErr = errors.Join(exportErr, wrapStore("closing bulk export snapshot", err))
+		}
+	}()
+
+	prefix := docsPrefix(database)
+	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	if err != nil {
+		return wrapStore("creating bulk export iterator", err)
+	}
+	defer func() {
+		if err := iter.Close(); err != nil {
+			exportErr = errors.Join(exportErr, wrapStore("closing bulk export iterator", err))
+		}
+	}()
+
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		id := string(iter.Key()[len(prefix):])
+		if err := validateID(id); err != nil {
+			return fmt.Errorf("%w: invalid document key", errCorruptData)
+		}
+
+		doc, err := openDoc(iter.Key(), databaseKey, id, iter.Value())
+		if err != nil {
+			return fmt.Errorf("reading export document: %w", err)
+		}
+		if err := yield(doc.json); err != nil {
+			clear(doc.json)
+
+			return fmt.Errorf("writing export document: %w", err)
+		}
+		clear(doc.json)
+	}
+	if err := iter.Error(); err != nil {
+		return wrapStore("iterating bulk export", err)
+	}
+
+	return nil
+}
+
 func (s *store) importDocs(ctx context.Context, database string, documents [][]byte, maxBatchBytes int) (ids []string, importErr error) {
 	dbMu := s.dbLock(database)
 	dbMu.RLock()
