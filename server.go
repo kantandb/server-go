@@ -17,8 +17,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 type api struct {
@@ -137,31 +135,77 @@ const (
 )
 
 func (a *api) handler() http.Handler {
-	router := gin.New()
-	router.HandleMethodNotAllowed = true
-	router.RedirectFixedPath = false
-	router.RedirectTrailingSlash = true
-	router.GET("/", a.welcome)
-	router.GET("/healthz", a.health)
-	router.POST("/db", a.createDB)
-	router.GET("/db", a.listDBs)
-	router.GET("/db/:database", a.listDocs)
-	router.Handle(queryMethod, "/db/:database", a.queryDocs)
-	router.OPTIONS("/db/:database", a.queryOptions)
-	router.DELETE("/db/:database", a.deleteDB)
-	router.POST("/db/:database", a.createDoc)
-	router.GET("/db/:database/:id", a.getDoc)
-	router.PUT("/db/:database/:id", a.replaceDoc)
-	router.PATCH("/db/:database/:id", a.patchDoc)
-	router.DELETE("/db/:database/:id", a.deleteDoc)
-	router.NoRoute(func(c *gin.Context) {
-		writeError(c, http.StatusNotFound, "route_not_found", "Route does not exist")
-	})
-	router.NoMethod(func(c *gin.Context) {
-		writeError(c, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
-	})
+	mux := http.NewServeMux()
+	route(mux, http.MethodGet, "/{$}", a.welcome)
+	route(mux, http.MethodGet, "/healthz", a.health)
+	route(mux, http.MethodPost, "/db", a.createDB)
+	route(mux, http.MethodGet, "/db", a.listDBs)
+	route(mux, http.MethodGet, "/db/{database}", a.listDocs)
+	route(mux, queryMethod, "/db/{database}", a.queryDocs)
+	route(mux, http.MethodOptions, "/db/{database}", a.queryOptions)
+	route(mux, http.MethodDelete, "/db/{database}", a.deleteDB)
+	route(mux, http.MethodPost, "/db/{database}", a.createDoc)
+	route(mux, http.MethodGet, "/db/{database}/{id}", a.getDoc)
+	route(mux, http.MethodPut, "/db/{database}/{id}", a.replaceDoc)
+	route(mux, http.MethodPatch, "/db/{database}/{id}", a.patchDoc)
+	route(mux, http.MethodDelete, "/db/{database}/{id}", a.deleteDoc)
 
-	return a.recoverHTTP(a.rejectStoppingHTTP(router))
+	for _, pattern := range []string{"/{$}", "/healthz", "/db", "/db/{database}", "/db/{database}/{id}"} {
+		mux.HandleFunc(pattern, methodNotAllowed)
+	}
+	mux.HandleFunc("/", notFound)
+
+	return a.recover(a.rejectStopping(rejectUncleanPath(mux)))
+}
+
+func route(mux *http.ServeMux, method, pattern string, handler http.HandlerFunc) {
+	mux.HandleFunc(method+" "+pattern, handler)
+	if method == http.MethodGet {
+		mux.HandleFunc(http.MethodHead+" "+pattern, methodNotAllowed)
+	}
+	if pattern != "/{$}" {
+		mux.HandleFunc(method+" "+pattern+"/{$}", redirectNoSlash)
+	}
+}
+
+func redirectNoSlash(w http.ResponseWriter, r *http.Request) {
+	status := http.StatusTemporaryRedirect
+	if r.Method == http.MethodGet {
+		status = http.StatusMovedPermanently
+	}
+
+	location := strings.TrimSuffix(r.URL.Path, "/")
+	if r.URL.RawQuery != "" {
+		location += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, location, status)
+}
+
+func methodNotAllowed(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
+}
+
+func notFound(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusNotFound, "route_not_found", "Route does not exist")
+}
+
+func rejectUncleanPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "//") {
+			notFound(w, r)
+
+			return
+		}
+		for _, part := range strings.Split(r.URL.Path, "/") {
+			if part == "." || part == ".." {
+				notFound(w, r)
+
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *api) stop() {
@@ -188,7 +232,7 @@ func (w *responseState) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
-func (a *api) recoverHTTP(next http.Handler) http.Handler {
+func (a *api) recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := &responseState{ResponseWriter: w}
 		defer func() {
@@ -203,7 +247,7 @@ func (a *api) recoverHTTP(next http.Handler) http.Handler {
 			}
 			a.log.Error("request panic", "method", r.Method, "path", r.URL.Path, "error", err, "stack", string(debug.Stack()))
 			if !state.written {
-				writeFailureHTTP(state, err)
+				writeFailure(state, err)
 			}
 		}()
 
@@ -211,10 +255,10 @@ func (a *api) recoverHTTP(next http.Handler) http.Handler {
 	})
 }
 
-func (a *api) rejectStoppingHTTP(next http.Handler) http.Handler {
+func (a *api) rejectStopping(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.stopping.Load() {
-			writeErrorHTTP(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
+			writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
 
 			return
 		}
@@ -223,92 +267,77 @@ func (a *api) rejectStoppingHTTP(next http.Handler) http.Handler {
 	})
 }
 
-func writeFailureHTTP(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, errCorruptData):
-		writeErrorHTTP(w, http.StatusInternalServerError, "corrupt_data", "Stored data is corrupt")
-	case isStoreUnavailable(err):
-		writeErrorHTTP(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
-	default:
-		writeErrorHTTP(w, http.StatusInternalServerError, "internal_error", "Internal server error")
-	}
+func (a *api) welcome(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, serviceInfo{Name: "KantanDB", Version: buildVersion})
 }
 
-func writeErrorHTTP(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
-}
-
-func (a *api) welcome(c *gin.Context) {
-	c.JSON(http.StatusOK, serviceInfo{Name: "KantanDB", Version: buildVersion})
-}
-
-func (a *api) health(c *gin.Context) {
+func (a *api) health(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.db.Metrics()
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (a *api) createDB(c *gin.Context) {
-	if !isJSON(c.GetHeader("Content-Type")) {
-		writeError(c, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+func (a *api) createDB(w http.ResponseWriter, r *http.Request) {
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 
 		return
 	}
 
-	body, err := readBody(c.Request.Body, a.maxBodyBytes)
+	body, err := readBody(r.Body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "Could not read request body")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
 
 		return
 	}
 
 	request, err := decodeDBRequest(body)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "Request body must contain a database name and optional indexes")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Request body must contain a database name and optional indexes")
 
 		return
 	}
 	if err := validateName(request.Name); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return
 	}
 
 	err = a.store.createDB(request.Name, request.indexDefs()...)
 	if errors.Is(err, errDBExists) {
-		writeError(c, http.StatusConflict, "database_exists", "Database already exists")
+		writeError(w, http.StatusConflict, "database_exists", "Database already exists")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndex) {
-		writeError(c, http.StatusBadRequest, "invalid_request", "Index definitions are invalid")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Index definitions are invalid")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "create database", err)
+		a.fail(w, r, "create database", err)
 
 		return
 	}
 
-	c.Header("Location", "/db/"+request.Name)
-	c.JSON(http.StatusCreated, request)
+	w.Header().Set("Location", "/db/"+request.Name)
+	writeJSON(w, http.StatusCreated, request)
 }
 
-func (a *api) listDBs(c *gin.Context) {
-	limit, cursor, ok := parseListQuery(c, validateName)
+func (a *api) listDBs(w http.ResponseWriter, r *http.Request) {
+	limit, cursor, ok := parseListQuery(w, r, validateName)
 	if !ok {
 		return
 	}
 
 	names, err := a.store.listDBs(limit, cursor)
 	if err != nil {
-		a.fail(c, "list databases", err)
+		a.fail(w, r, "list databases", err)
 
 		return
 	}
@@ -316,20 +345,20 @@ func (a *api) listDBs(c *gin.Context) {
 		names = []string{}
 	}
 
-	c.JSON(http.StatusOK, dbList{Databases: names})
+	writeJSON(w, http.StatusOK, dbList{Databases: names})
 }
 
-func (a *api) listDocs(c *gin.Context) {
-	c.Header("Accept-Query", "application/json")
+func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Accept-Query", "application/json")
 
-	database := c.Param("database")
+	database := r.PathValue("database")
 	if err := validateName(database); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return
 	}
 
-	query, ok := parseDocQuery(c)
+	query, ok := parseDocQuery(w, r)
 	if !ok {
 		return
 	}
@@ -352,15 +381,15 @@ func (a *api) listDocs(c *gin.Context) {
 			encoded, lastValue, cursor, err = queryStart(box, database, query)
 		}
 		if errors.Is(err, errInvalidQueryCursor) {
-			writeError(c, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
 
 			return
 		}
 		if err == nil {
 			if query.op == cmpEq {
-				ids, more, err = a.store.queryDocsCtx(c.Request.Context(), database, query.index, encoded, query.limit, cursor)
+				ids, more, err = a.store.queryDocsCtx(r.Context(), database, query.index, encoded, query.limit, cursor)
 			} else {
-				page, queryErr := a.store.queryRangePage(c.Request.Context(), database, query.index, query.op, encoded, query.limit, lastValue, cursor)
+				page, queryErr := a.store.queryRangePage(r.Context(), database, query.index, query.op, encoded, query.limit, lastValue, cursor)
 				ids, lastValue, more, err = page.ids, page.lastValue, page.more, queryErr
 			}
 		}
@@ -368,22 +397,22 @@ func (a *api) listDocs(c *gin.Context) {
 		ids, more, err = a.store.listDocs(database, query.limit, query.cursor)
 	}
 	if errors.Is(err, errDBNotFound) {
-		writeError(c, http.StatusNotFound, "database_not_found", "Database does not exist")
+		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
 		return
 	}
 	if errors.Is(err, errIndexNotFound) {
-		writeError(c, http.StatusNotFound, "index_not_found", "Index does not exist")
+		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndexValue) {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Query is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "list documents", err)
+		a.fail(w, r, "list documents", err)
 
 		return
 	}
@@ -396,7 +425,7 @@ func (a *api) listDocs(c *gin.Context) {
 	if more && query.indexed {
 		cursor, err = encodeQueryCursor(box, queryCursor{database: database, index: query.index, op: query.op, value: encoded, lastValue: lastValue, id: ids[len(ids)-1]})
 		if err != nil {
-			a.fail(c, "encode query cursor", err)
+			a.fail(w, r, "encode query cursor", err)
 
 			return
 		}
@@ -404,56 +433,56 @@ func (a *api) listDocs(c *gin.Context) {
 		cursor = ids[len(ids)-1]
 	}
 
-	c.JSON(http.StatusOK, docList{Documents: ids, Cursor: cursor})
+	writeJSON(w, http.StatusOK, docList{Documents: ids, Cursor: cursor})
 }
 
-func (a *api) queryOptions(c *gin.Context) {
-	c.Header("Accept-Query", "application/json")
-	c.Header("Allow", "GET, POST, QUERY, DELETE, OPTIONS")
-	c.Status(http.StatusNoContent)
+func (a *api) queryOptions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Accept-Query", "application/json")
+	w.Header().Set("Allow", "GET, POST, QUERY, DELETE, OPTIONS")
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *api) queryDocs(c *gin.Context) {
-	c.Header("Accept-Query", "application/json")
-	c.Header("Cache-Control", "no-store")
+func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Accept-Query", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 
-	database := c.Param("database")
+	database := r.PathValue("database")
 	if err := validateName(database); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return
 	}
-	if c.Request.URL.RawQuery != "" {
-		writeError(c, http.StatusBadRequest, "invalid_query", "URI query parameters are not supported")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "URI query parameters are not supported")
 
 		return
 	}
-	if !isJSON(c.GetHeader("Content-Type")) {
-		writeError(c, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 
 		return
 	}
 
-	body, err := readBody(c.Request.Body, min(a.maxBodyBytes, int64(maxQueryBody)))
+	body, err := readBody(r.Body, min(a.maxBodyBytes, int64(maxQueryBody)))
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "Could not read request body")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
 
 		return
 	}
 	query, err := decodePathQuery(body)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Query body is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Query body is invalid")
 
 		return
 	}
 	plan, err := a.store.planPathQuery(database, query.path)
 	if errors.Is(err, errInvalidPath) {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Path is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Path is invalid")
 
 		return
 	}
@@ -461,38 +490,38 @@ func (a *api) queryDocs(c *gin.Context) {
 	var ids []string
 	var cursor string
 	if err == nil {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), queryTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
 		defer cancel()
 
 		ids, cursor, err = a.store.executePathQuery(ctx, database, plan, query)
 	}
 	if errors.Is(err, errInvalidQueryCursor) {
-		writeError(c, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
 
 		return
 	}
 	if errors.Is(err, errDBNotFound) {
-		writeError(c, http.StatusNotFound, "database_not_found", "Database does not exist")
+		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndexValue) {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Query is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		writeError(c, http.StatusServiceUnavailable, "query_timeout", "Query exceeded the execution limit")
+		writeError(w, http.StatusServiceUnavailable, "query_timeout", "Query exceeded the execution limit")
 
 		return
 	}
 	if errors.Is(err, errQueryLimit) {
-		writeError(c, http.StatusServiceUnavailable, "query_limit", "Query exceeded the evaluation limit")
+		writeError(w, http.StatusServiceUnavailable, "query_limit", "Query exceeded the evaluation limit")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "query documents", err)
+		a.fail(w, r, "query documents", err)
 
 		return
 	}
@@ -500,7 +529,7 @@ func (a *api) queryDocs(c *gin.Context) {
 		ids = []string{}
 	}
 
-	c.JSON(http.StatusOK, docList{Documents: ids, Cursor: cursor})
+	writeJSON(w, http.StatusOK, docList{Documents: ids, Cursor: cursor})
 }
 
 func queryStart(box cipher.AEAD, database string, query docQuery) ([]byte, []byte, string, error) {
@@ -520,16 +549,16 @@ func queryStart(box cipher.AEAD, database string, query docQuery) ([]byte, []byt
 	return encoded, cursor.lastValue, cursor.id, nil
 }
 
-func parseDocQuery(c *gin.Context) (docQuery, bool) {
-	values, err := url.ParseQuery(c.Request.URL.RawQuery)
+func parseDocQuery(w http.ResponseWriter, r *http.Request) (docQuery, bool) {
+	values, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Query is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
 		return docQuery{}, false
 	}
 	for name, entries := range values {
 		if name != "limit" && name != "cursor" && name != "index" && name != "op" && name != "value" || len(entries) != 1 {
-			writeError(c, http.StatusBadRequest, "invalid_query", "Query is invalid")
+			writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
 			return docQuery{}, false
 		}
@@ -539,7 +568,7 @@ func parseDocQuery(c *gin.Context) (docQuery, bool) {
 	if entries, ok := values["limit"]; ok {
 		limit, err := strconv.Atoi(entries[0])
 		if err != nil || limit < 1 || limit > maxListLimit {
-			writeError(c, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
+			writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
 
 			return docQuery{}, false
 		}
@@ -553,19 +582,19 @@ func parseDocQuery(c *gin.Context) (docQuery, bool) {
 	rawValues, hasValue := values["value"]
 	ops, hasOp := values["op"]
 	if hasIndex != hasValue {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Index and value must appear together")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Index and value must appear together")
 
 		return docQuery{}, false
 	}
 	if hasOp && !hasIndex {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Operator requires index and value")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Operator requires index and value")
 
 		return docQuery{}, false
 	}
 	if !hasIndex {
 		if query.cursor != "" {
 			if err := validateID(query.cursor); err != nil {
-				writeError(c, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+				writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
 
 				return docQuery{}, false
 			}
@@ -574,14 +603,14 @@ func parseDocQuery(c *gin.Context) (docQuery, bool) {
 		return query, true
 	}
 	if err := validateName(indexes[0]); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Index is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Index is invalid")
 
 		return docQuery{}, false
 	}
 
 	value, err := decodeQueryValue(rawValues[0])
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_query", "Value must be one JSON scalar")
+		writeError(w, http.StatusBadRequest, "invalid_query", "Value must be one JSON scalar")
 
 		return docQuery{}, false
 	}
@@ -589,7 +618,7 @@ func parseDocQuery(c *gin.Context) (docQuery, bool) {
 		var ok bool
 		query.op, ok = parseCmpOp(ops[0])
 		if !ok {
-			writeError(c, http.StatusBadRequest, "invalid_query", "Operator is invalid")
+			writeError(w, http.StatusBadRequest, "invalid_query", "Operator is invalid")
 
 			return docQuery{}, false
 		}
@@ -597,7 +626,7 @@ func parseDocQuery(c *gin.Context) (docQuery, bool) {
 	if query.op != cmpEq {
 		switch value.(type) {
 		case nil, bool:
-			writeError(c, http.StatusBadRequest, "invalid_query", "Operator does not support this value")
+			writeError(w, http.StatusBadRequest, "invalid_query", "Operator does not support this value")
 
 			return docQuery{}, false
 		}
@@ -648,22 +677,22 @@ func decodeQueryValue(raw string) (any, error) {
 	}
 }
 
-func parseListQuery(c *gin.Context, validateCursor func(string) error) (int, string, bool) {
+func parseListQuery(w http.ResponseWriter, r *http.Request, validateCursor func(string) error) (int, string, bool) {
 	limit := defaultListLimit
-	if value, ok := c.GetQuery("limit"); ok {
-		parsed, err := strconv.Atoi(value)
+	if values, ok := r.URL.Query()["limit"]; ok {
+		parsed, err := strconv.Atoi(values[0])
 		if err != nil || parsed < 1 || parsed > maxListLimit {
-			writeError(c, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
+			writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
 
 			return 0, "", false
 		}
 		limit = parsed
 	}
 
-	cursor := c.Query("cursor")
+	cursor := r.URL.Query().Get("cursor")
 	if cursor != "" {
 		if err := validateCursor(cursor); err != nil {
-			writeError(c, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+			writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
 
 			return 0, "", false
 		}
@@ -672,289 +701,289 @@ func parseListQuery(c *gin.Context, validateCursor func(string) error) (int, str
 	return limit, cursor, true
 }
 
-func (a *api) deleteDB(c *gin.Context) {
-	name := c.Param("database")
+func (a *api) deleteDB(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("database")
 	if err := validateName(name); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return
 	}
 
 	if err := a.store.deleteDB(name); errors.Is(err, errDBNotFound) {
-		writeError(c, http.StatusNotFound, "database_not_found", "Database does not exist")
+		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
 		return
 	} else if err != nil {
-		a.fail(c, "delete database", err)
+		a.fail(w, r, "delete database", err)
 
 		return
 	}
 
-	c.Status(http.StatusNoContent)
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *api) createDoc(c *gin.Context) {
-	if !isJSON(c.GetHeader("Content-Type")) {
-		writeError(c, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+func (a *api) createDoc(w http.ResponseWriter, r *http.Request) {
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 
 		return
 	}
 
-	database := c.Param("database")
+	database := r.PathValue("database")
 	if err := validateName(database); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return
 	}
 
-	body, err := readBody(c.Request.Body, a.maxBodyBytes)
+	body, err := readBody(r.Body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_document", "Could not read document")
+		writeError(w, http.StatusBadRequest, "invalid_document", "Could not read document")
 
 		return
 	}
 
 	document, err := validateDoc(body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_document", "Document must be a JSON object")
+		writeError(w, http.StatusBadRequest, "invalid_document", "Document must be a JSON object")
 
 		return
 	}
 
 	id, err := makeID()
 	if err != nil {
-		a.fail(c, "generate document ID", err)
+		a.fail(w, r, "generate document ID", err)
 
 		return
 	}
 	rev, err := a.store.createDoc(database, id, document)
 	if errors.Is(err, errDBNotFound) {
-		writeError(c, http.StatusNotFound, "database_not_found", "Database does not exist")
+		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndexValue) {
-		writeError(c, http.StatusBadRequest, "invalid_document", "An indexed value exceeds the size limit")
+		writeError(w, http.StatusBadRequest, "invalid_document", "An indexed value exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "create document", err)
+		a.fail(w, r, "create document", err)
 
 		return
 	}
 
-	c.Header("Location", "/db/"+database+"/"+id)
-	c.Header("ETag", formatETag(rev))
-	c.JSON(http.StatusCreated, docResponse{ID: id})
+	w.Header().Set("Location", "/db/"+database+"/"+id)
+	w.Header().Set("ETag", formatETag(rev))
+	writeJSON(w, http.StatusCreated, docResponse{ID: id})
 }
 
-func (a *api) getDoc(c *gin.Context) {
-	if !validDocPath(c) {
+func (a *api) getDoc(w http.ResponseWriter, r *http.Request) {
+	if !validDocPath(w, r) {
 		return
 	}
 
-	doc, err := a.store.getDoc(c.Param("database"), c.Param("id"))
+	doc, err := a.store.getDoc(r.PathValue("database"), r.PathValue("id"))
 	if errors.Is(err, errDocNotFound) {
-		writeError(c, http.StatusNotFound, "document_not_found", "Document does not exist")
+		writeError(w, http.StatusNotFound, "document_not_found", "Document does not exist")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "read document", err)
+		a.fail(w, r, "read document", err)
 
 		return
 	}
 
-	c.Header("ETag", formatETag(doc.revision))
-	c.Data(http.StatusOK, "application/json", doc.json)
+	w.Header().Set("ETag", formatETag(doc.revision))
+	writeData(w, http.StatusOK, "application/json", doc.json)
 }
 
-func (a *api) replaceDoc(c *gin.Context) {
-	if !isJSON(c.GetHeader("Content-Type")) {
-		writeError(c, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+func (a *api) replaceDoc(w http.ResponseWriter, r *http.Request) {
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
 
 		return
 	}
-	if !validDocPath(c) {
+	if !validDocPath(w, r) {
 		return
 	}
 
-	match, err := parseIfMatch(c.Request.Header.Values("If-Match"))
+	match, err := parseIfMatch(r.Header.Values("If-Match"))
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
 
 		return
 	}
 
-	body, err := readBody(c.Request.Body, a.maxBodyBytes)
+	body, err := readBody(r.Body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_document", "Could not read document")
+		writeError(w, http.StatusBadRequest, "invalid_document", "Could not read document")
 
 		return
 	}
 
 	document, err := validateDoc(body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_document", "Document must be a JSON object")
+		writeError(w, http.StatusBadRequest, "invalid_document", "Document must be a JSON object")
 
 		return
 	}
 
-	rev, err := a.store.replaceDoc(c.Param("database"), c.Param("id"), document, match)
+	rev, err := a.store.replaceDoc(r.PathValue("database"), r.PathValue("id"), document, match)
 	if errors.Is(err, errDocNotFound) {
-		writeError(c, http.StatusNotFound, "document_not_found", "Document does not exist")
+		writeError(w, http.StatusNotFound, "document_not_found", "Document does not exist")
 
 		return
 	}
 	if errors.Is(err, errPreconditionFailed) {
-		writeError(c, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
+		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndexValue) {
-		writeError(c, http.StatusBadRequest, "invalid_document", "An indexed value exceeds the size limit")
+		writeError(w, http.StatusBadRequest, "invalid_document", "An indexed value exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "replace document", err)
+		a.fail(w, r, "replace document", err)
 
 		return
 	}
 
-	c.Header("ETag", formatETag(rev))
-	c.Data(http.StatusOK, "application/json", document)
+	w.Header().Set("ETag", formatETag(rev))
+	writeData(w, http.StatusOK, "application/json", document)
 }
 
-func (a *api) patchDoc(c *gin.Context) {
-	mediaType, err := parsePatchType(c.GetHeader("Content-Type"))
+func (a *api) patchDoc(w http.ResponseWriter, r *http.Request) {
+	mediaType, err := parsePatchType(r.Header.Get("Content-Type"))
 	if err != nil {
-		writeError(c, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must select a supported patch format")
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must select a supported patch format")
 
 		return
 	}
-	if !validDocPath(c) {
+	if !validDocPath(w, r) {
 		return
 	}
 
-	match, err := parseIfMatch(c.Request.Header.Values("If-Match"))
+	match, err := parseIfMatch(r.Header.Values("If-Match"))
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
 
 		return
 	}
 
-	body, err := readBody(c.Request.Body, a.maxBodyBytes)
+	body, err := readBody(r.Body, a.maxBodyBytes)
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Request body exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_patch", "Could not read patch")
+		writeError(w, http.StatusBadRequest, "invalid_patch", "Could not read patch")
 
 		return
 	}
 
-	doc, err := a.store.patchDoc(c.Param("database"), c.Param("id"), match, func(document []byte) ([]byte, error) {
+	doc, err := a.store.patchDoc(r.PathValue("database"), r.PathValue("id"), match, func(document []byte) ([]byte, error) {
 		return applyPatch(document, body, mediaType, a.maxBodyBytes)
 	})
 	if errors.Is(err, errDocNotFound) {
-		writeError(c, http.StatusNotFound, "document_not_found", "Document does not exist")
+		writeError(w, http.StatusNotFound, "document_not_found", "Document does not exist")
 
 		return
 	}
 	if errors.Is(err, errPreconditionFailed) {
-		writeError(c, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
+		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
 
 		return
 	}
 	if errors.Is(err, errBodyTooLarge) {
-		writeError(c, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
+		writeError(w, http.StatusRequestEntityTooLarge, "content_too_large", "Document exceeds the size limit")
 
 		return
 	}
 	if errors.Is(err, errInvalidPatch) {
-		writeError(c, http.StatusBadRequest, "invalid_patch", "Patch is invalid or produces a non-object document")
+		writeError(w, http.StatusBadRequest, "invalid_patch", "Patch is invalid or produces a non-object document")
 
 		return
 	}
 	if errors.Is(err, errInvalidIndexValue) {
-		writeError(c, http.StatusBadRequest, "invalid_patch", "An indexed value exceeds the size limit")
+		writeError(w, http.StatusBadRequest, "invalid_patch", "An indexed value exceeds the size limit")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "patch document", err)
+		a.fail(w, r, "patch document", err)
 
 		return
 	}
 
-	c.Header("ETag", formatETag(doc.revision))
-	c.Data(http.StatusOK, "application/json", doc.json)
+	w.Header().Set("ETag", formatETag(doc.revision))
+	writeData(w, http.StatusOK, "application/json", doc.json)
 }
 
-func (a *api) deleteDoc(c *gin.Context) {
-	if !validDocPath(c) {
+func (a *api) deleteDoc(w http.ResponseWriter, r *http.Request) {
+	if !validDocPath(w, r) {
 		return
 	}
 
-	match, err := parseIfMatch(c.Request.Header.Values("If-Match"))
+	match, err := parseIfMatch(r.Header.Values("If-Match"))
 	if err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
+		writeError(w, http.StatusBadRequest, "invalid_if_match", "If-Match is invalid")
 
 		return
 	}
 
-	err = a.store.deleteDoc(c.Param("database"), c.Param("id"), match)
+	err = a.store.deleteDoc(r.PathValue("database"), r.PathValue("id"), match)
 	if errors.Is(err, errDocNotFound) {
-		writeError(c, http.StatusNotFound, "document_not_found", "Document does not exist")
+		writeError(w, http.StatusNotFound, "document_not_found", "Document does not exist")
 
 		return
 	}
 	if errors.Is(err, errPreconditionFailed) {
-		writeError(c, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
+		writeError(w, http.StatusPreconditionFailed, "precondition_failed", "If-Match precondition failed")
 
 		return
 	}
 	if err != nil {
-		a.fail(c, "delete document", err)
+		a.fail(w, r, "delete document", err)
 
 		return
 	}
 
-	c.Status(http.StatusNoContent)
+	w.WriteHeader(http.StatusNoContent)
 }
 
-func validDocPath(c *gin.Context) bool {
-	if err := validateName(c.Param("database")); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_name", "Database name is invalid")
+func validDocPath(w http.ResponseWriter, r *http.Request) bool {
+	if err := validateName(r.PathValue("database")); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_name", "Database name is invalid")
 
 		return false
 	}
-	if err := validateID(c.Param("id")); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_id", "Document ID is invalid")
+	if err := validateID(r.PathValue("id")); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "Document ID is invalid")
 
 		return false
 	}
@@ -999,22 +1028,22 @@ func isJSON(value string) bool {
 	return err == nil && mediaType == "application/json"
 }
 
-func (a *api) fail(c *gin.Context, operation string, err error) {
-	a.log.Error("request failed", "operation", operation, "method", c.Request.Method, "path", c.Request.URL.Path, "error", err)
-	writeFailure(c, err)
+func (a *api) fail(w http.ResponseWriter, r *http.Request, operation string, err error) {
+	a.log.Error("request failed", "operation", operation, "method", r.Method, "path", r.URL.Path, "error", err)
+	writeFailure(w, err)
 }
 
-func writeFailure(c *gin.Context, err error) {
+func writeFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errCorruptData):
-		writeError(c, http.StatusInternalServerError, "corrupt_data", "Stored data is corrupt")
+		writeError(w, http.StatusInternalServerError, "corrupt_data", "Stored data is corrupt")
 	case isStoreUnavailable(err):
-		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
 	default:
-		writeError(c, http.StatusInternalServerError, "internal_error", "Internal server error")
+		writeError(w, http.StatusInternalServerError, "internal_error", "Internal server error")
 	}
 }
 
-func writeError(c *gin.Context, status int, code, message string) {
-	c.JSON(status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
 }

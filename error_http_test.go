@@ -87,7 +87,7 @@ func TestRecoveryResponse(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, "/panic", nil)
 			res := httptest.NewRecorder()
-			a.recoverHTTP(panicHandler).ServeHTTP(res, req)
+			a.recover(panicHandler).ServeHTTP(res, req)
 
 			if res.Code != tt.status {
 				t.Errorf("status = %d, want %d", res.Code, tt.status)
