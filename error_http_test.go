@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/gin-gonic/gin"
 )
 
 func TestRoutingErrorsUseEnvelope(t *testing.T) {
@@ -24,6 +25,79 @@ func TestRoutingErrorsUseEnvelope(t *testing.T) {
 
 	res = sendRequest(t, server, http.MethodGet, "/users", "", "")
 	checkResponse(t, res, http.StatusNotFound, `{"error":{"code":"route_not_found","message":"Route does not exist"}}`)
+}
+
+func TestRoutingMethodAndPathEdges(t *testing.T) {
+	t.Parallel()
+
+	handler := newHandler(testStore(t), defaultMaxBodyBytes)
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		status int
+		body   string
+	}{
+		{name: "HEAD is unsupported", method: http.MethodHead, path: "/healthz", status: http.StatusMethodNotAllowed, body: `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`},
+		{name: "wrong collection method", method: http.MethodPut, path: "/db", status: http.StatusMethodNotAllowed, body: `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`},
+		{name: "wrong document method", method: queryMethod, path: "/db/dbname/01950000-0000-7000-8000-000000000001", status: http.StatusMethodNotAllowed, body: `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`},
+		{name: "extra segment", method: http.MethodGet, path: "/db/dbname/id/extra", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
+		{name: "repeated slash", method: http.MethodGet, path: "/healthz//", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
+		{name: "dot segment", method: http.MethodGet, path: "/./healthz", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+
+			if res.Code != tt.status {
+				t.Errorf("status = %d, want %d", res.Code, tt.status)
+			}
+			if got := res.Body.String(); got != tt.body {
+				t.Errorf("body = %q, want %q", got, tt.body)
+			}
+		})
+	}
+}
+
+func TestRecoveryResponse(t *testing.T) {
+	t.Parallel()
+
+	a := newAPI(nil, defaultMaxBodyBytes, slog.New(slog.DiscardHandler))
+	tests := []struct {
+		name   string
+		write  bool
+		status int
+		body   string
+	}{
+		{name: "before write", status: http.StatusInternalServerError, body: `{"error":{"code":"internal_error","message":"Internal server error"}}`},
+		{name: "after write", write: true, status: http.StatusAccepted, body: "partial"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := gin.New()
+			router.Use(a.recover)
+			router.GET("/panic", func(c *gin.Context) {
+				if tt.write {
+					c.Status(http.StatusAccepted)
+					_, _ = c.Writer.WriteString("partial")
+				}
+				panic("boom")
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+			res := httptest.NewRecorder()
+			router.ServeHTTP(res, req)
+
+			if res.Code != tt.status {
+				t.Errorf("status = %d, want %d", res.Code, tt.status)
+			}
+			if got := res.Body.String(); got != tt.body {
+				t.Errorf("body = %q, want %q", got, tt.body)
+			}
+		})
+	}
 }
 
 func TestTrailingSlashRedirects(t *testing.T) {
