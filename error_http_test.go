@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/gin-gonic/gin"
 )
 
 func TestRoutingErrorsUseEnvelope(t *testing.T) {
@@ -76,19 +75,19 @@ func TestRecoveryResponse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := gin.New()
-			router.Use(a.recover)
-			router.GET("/panic", func(c *gin.Context) {
+			panicHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if tt.write {
-					c.Status(http.StatusAccepted)
-					_, _ = c.Writer.WriteString("partial")
+					w.WriteHeader(http.StatusAccepted)
+					if _, err := w.Write([]byte("partial")); err != nil {
+						t.Fatalf("Write() error = %v", err)
+					}
 				}
 				panic("boom")
 			})
 
 			req := httptest.NewRequest(http.MethodGet, "/panic", nil)
 			res := httptest.NewRecorder()
-			router.ServeHTTP(res, req)
+			a.recoverHTTP(panicHandler).ServeHTTP(res, req)
 
 			if res.Code != tt.status {
 				t.Errorf("status = %d, want %d", res.Code, tt.status)

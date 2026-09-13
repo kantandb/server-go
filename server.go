@@ -141,7 +141,6 @@ func (a *api) handler() http.Handler {
 	router.HandleMethodNotAllowed = true
 	router.RedirectFixedPath = false
 	router.RedirectTrailingSlash = true
-	router.Use(a.recover, a.rejectStopping)
 	router.GET("/", a.welcome)
 	router.GET("/healthz", a.health)
 	router.POST("/db", a.createDB)
@@ -162,43 +161,81 @@ func (a *api) handler() http.Handler {
 		writeError(c, http.StatusMethodNotAllowed, "method_not_allowed", "Method is not allowed")
 	})
 
-	return router
+	return a.recoverHTTP(a.rejectStoppingHTTP(router))
 }
 
 func (a *api) stop() {
 	a.stopping.Store(true)
 }
 
-func (a *api) recover(c *gin.Context) {
-	defer func() {
-		value := recover()
-		if value == nil {
+type responseState struct {
+	http.ResponseWriter
+	written bool
+}
+
+func (w *responseState) WriteHeader(status int) {
+	w.written = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseState) Write(body []byte) (int, error) {
+	w.written = true
+
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *responseState) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (a *api) recoverHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		state := &responseState{ResponseWriter: w}
+		defer func() {
+			value := recover()
+			if value == nil {
+				return
+			}
+
+			err, ok := value.(error)
+			if !ok {
+				err = fmt.Errorf("panic: %v", value)
+			}
+			a.log.Error("request panic", "method", r.Method, "path", r.URL.Path, "error", err, "stack", string(debug.Stack()))
+			if !state.written {
+				writeFailureHTTP(state, err)
+			}
+		}()
+
+		next.ServeHTTP(state, r)
+	})
+}
+
+func (a *api) rejectStoppingHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.stopping.Load() {
+			writeErrorHTTP(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
+
 			return
 		}
 
-		err, ok := value.(error)
-		if !ok {
-			err = fmt.Errorf("panic: %v", value)
-		}
-		a.log.Error("request panic", "method", c.Request.Method, "path", c.Request.URL.Path, "error", err, "stack", string(debug.Stack()))
-		if !c.Writer.Written() {
-			writeFailure(c, err)
-		}
-		c.Abort()
-	}()
-
-	c.Next()
+		next.ServeHTTP(w, r)
+	})
 }
 
-func (a *api) rejectStopping(c *gin.Context) {
-	if a.stopping.Load() {
-		writeError(c, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
-		c.Abort()
-
-		return
+func writeFailureHTTP(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errCorruptData):
+		writeErrorHTTP(w, http.StatusInternalServerError, "corrupt_data", "Stored data is corrupt")
+	case isStoreUnavailable(err):
+		writeErrorHTTP(w, http.StatusServiceUnavailable, "service_unavailable", "Service is unavailable")
+	default:
+		writeErrorHTTP(w, http.StatusInternalServerError, "internal_error", "Internal server error")
 	}
+}
 
-	c.Next()
+func writeErrorHTTP(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, errorEnvelope{Error: errorBody{Code: code, Message: message}})
 }
 
 func (a *api) welcome(c *gin.Context) {
