@@ -191,7 +191,7 @@ func notFound(w http.ResponseWriter, _ *http.Request) {
 
 func rejectUncleanPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "//") {
+		if strings.Contains(r.URL.Path, "//") {
 			notFound(w, r)
 
 			return

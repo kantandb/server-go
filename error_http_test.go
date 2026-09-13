@@ -41,6 +41,7 @@ func TestRoutingMethodAndPathEdges(t *testing.T) {
 		{name: "wrong collection method", method: http.MethodPut, path: "/db", status: http.StatusMethodNotAllowed, body: `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`},
 		{name: "wrong document method", method: queryMethod, path: "/db/dbname/01950000-0000-7000-8000-000000000001", status: http.StatusMethodNotAllowed, body: `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`},
 		{name: "extra segment", method: http.MethodGet, path: "/db/dbname/id/extra", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
+		{name: "leading repeated slash", method: http.MethodGet, path: "//", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
 		{name: "repeated slash", method: http.MethodGet, path: "/healthz//", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
 		{name: "dot segment", method: http.MethodGet, path: "/./healthz", status: http.StatusNotFound, body: `{"error":{"code":"route_not_found","message":"Route does not exist"}}`},
 	}
