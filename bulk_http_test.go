@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -192,6 +195,44 @@ func TestBulkLimitsHTTP(t *testing.T) {
 			t.Errorf("response = %d %s", res.StatusCode, body)
 		}
 	})
+}
+
+func TestBulkTimeoutInterruptsBodyRead(t *testing.T) {
+	t.Parallel()
+
+	bulk := defaultBulkConfig()
+	bulk.timeout = 20 * time.Millisecond
+	store, server := newBulkTestServer(t, defaultMaxBodyBytes, bulk)
+	if err := store.createDB("db"); err != nil {
+		t.Fatalf("createDB() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("net.Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := fmt.Fprint(conn, "POST /bulk/db HTTP/1.1\r\nHost: test\r\nContent-Type: application/x-ndjson\r\nContent-Length: 2\r\n\r\n"); err != nil {
+		t.Fatalf("write request error = %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+
+	res, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("ReadResponse() error = %v", err)
+	}
+	body := readResponse(t, res)
+	if res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"bulk_timeout"`) {
+		t.Errorf("response = %d %s", res.StatusCode, body)
+	}
+
+	res = sendRequest(t, server, http.MethodGet, "/bulk/db", "", "")
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("bulk slot remained occupied: status = %d", res.StatusCode)
+	}
+	_ = readResponse(t, res)
 }
 
 func newBulkTestServer(t *testing.T, maxBodyBytes int64, bulk bulkConfig) (*store, *httptest.Server) {

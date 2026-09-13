@@ -828,7 +828,31 @@ func (a *api) startBulk(w http.ResponseWriter, r *http.Request) (context.Context
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), a.bulk.timeout)
+	deadline, _ := ctx.Deadline()
+	controller := http.NewResponseController(w)
+
+	var deadlineErr error
+	if r.Method == http.MethodPost {
+		deadlineErr = controller.SetReadDeadline(deadline)
+	} else {
+		deadlineErr = controller.SetWriteDeadline(deadline)
+	}
+	if deadlineErr != nil && !errors.Is(deadlineErr, http.ErrNotSupported) {
+		cancel()
+		a.freeBulkSlot()
+		a.failBulk(w, r, "set network deadline", deadlineErr)
+
+		return nil, nil, false
+	}
+
 	done := func() {
+		if r.Method == http.MethodPost {
+			if ctx.Err() == nil {
+				_ = controller.SetReadDeadline(time.Time{})
+			}
+		} else {
+			_ = controller.SetWriteDeadline(time.Time{})
+		}
 		cancel()
 		a.freeBulkSlot()
 	}

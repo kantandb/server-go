@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"time"
 )
 
 const (
@@ -79,6 +80,13 @@ func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64,
 			continue
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+				return nil, context.DeadlineExceeded
+			}
+
 			return nil, fmt.Errorf("%w: %w", errBulkRead, err)
 		}
 		if errors.Is(err, io.EOF) && len(line) == 0 {
