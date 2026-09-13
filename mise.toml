@@ -1,5 +1,6 @@
 [tools]
 go = "1.26"
+golangci-lint = "2.13.2"
 
 [tasks.build]
 run = '''
