@@ -32,6 +32,7 @@ var (
 )
 
 type pathQuery struct {
+	index  string
 	path   string
 	value  any
 	cursor string
@@ -61,7 +62,7 @@ func decodePathQuery(body []byte) (pathQuery, error) {
 	}
 
 	query := pathQuery{op: cmpEq, limit: defaultListLimit}
-	seen := make(map[string]bool, 5)
+	seen := make(map[string]bool, 6)
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
@@ -74,6 +75,8 @@ func decodePathQuery(body []byte) (pathQuery, error) {
 		seen[name] = true
 
 		switch name {
+		case "index":
+			err = decoder.Decode(&query.index)
 		case "path":
 			err = decoder.Decode(&query.path)
 		case "op":
@@ -104,8 +107,11 @@ func decodePathQuery(body []byte) (pathQuery, error) {
 	if err := jsonEnd(decoder); err != nil {
 		return pathQuery{}, err
 	}
-	if !seen["path"] || !seen["value"] || query.path == "" {
-		return pathQuery{}, errors.New("path and value are required")
+	if seen["path"] == seen["index"] || !seen["value"] {
+		return pathQuery{}, errors.New("exactly one of path or index, and value are required")
+	}
+	if seen["path"] && query.path == "" || seen["index"] && validateName(query.index) != nil {
+		return pathQuery{}, errors.New("invalid path or index")
 	}
 	if query.limit < 1 || query.limit > maxListLimit {
 		return pathQuery{}, errors.New("invalid limit")
@@ -137,6 +143,34 @@ func jsonEnd(decoder *json.Decoder) error {
 	}
 
 	return nil
+}
+
+// planQuery keeps named-index semantics separate from JSONPath evaluation.
+func (s *store) planQuery(database string, query pathQuery) (pathPlan, error) {
+	if query.index == "" {
+		return s.planPathQuery(database, query.path)
+	}
+
+	dbMu := s.dbLock(database)
+	dbMu.RLock()
+	defer dbMu.RUnlock()
+
+	exists, err := s.hasDB(database)
+	if err != nil {
+		return pathPlan{}, fmt.Errorf("checking database: %w", err)
+	}
+	if !exists {
+		return pathPlan{}, errDBNotFound
+	}
+	defs, err := s.indexes(database)
+	if err != nil {
+		return pathPlan{}, err
+	}
+	if _, ok := findIndex(defs, query.index); !ok {
+		return pathPlan{}, errIndexNotFound
+	}
+
+	return pathPlan{index: query.index}, nil
 }
 
 func (s *store) planPathQuery(database, raw string) (pathPlan, error) {

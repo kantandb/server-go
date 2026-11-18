@@ -1,126 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"unicode/utf8"
 )
 
-const (
-	queryCursorVersion          = 3
-	maxQueryCursorSize          = 1 + 10 + 63 + 10 + 63 + 1 + 10 + maxEncodedIndexValue + 10 + maxEncodedIndexValue + 10 + 36
-	maxEncryptedQueryCursorSize = maxQueryCursorSize + 12 + 16
-)
-
 var errInvalidQueryCursor = errors.New("invalid query cursor")
-
-type queryCursor struct {
-	database  string
-	index     string
-	op        cmpOp
-	value     []byte
-	lastValue []byte
-	id        string
-}
-
-func encodeQueryCursor(box cipher.AEAD, cursor queryCursor) (string, error) {
-	if err := validateQueryCursor(cursor); err != nil {
-		return "", errInvalidQueryCursor
-	}
-
-	data := []byte{queryCursorVersion}
-	data = appendPart(data, []byte(cursor.database))
-	data = appendPart(data, []byte(cursor.index))
-	data = append(data, byte(cursor.op))
-	data = appendPart(data, cursor.value)
-	data = appendPart(data, cursor.lastValue)
-	data = appendPart(data, []byte(cursor.id))
-
-	nonce := make([]byte, box.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("generating cursor nonce: %w", err)
-	}
-	sealed := box.Seal(append([]byte(nil), nonce...), nonce, data, nil)
-
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
-}
-
-func decodeQueryCursor(box cipher.AEAD, token string) (queryCursor, error) {
-	if token == "" || len(token) > base64.RawURLEncoding.EncodedLen(maxEncryptedQueryCursorSize) {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-
-	sealed, err := base64.RawURLEncoding.DecodeString(token)
-	if err != nil || base64.RawURLEncoding.EncodeToString(sealed) != token || len(sealed) > maxEncryptedQueryCursorSize {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-
-	if len(sealed) < box.NonceSize()+box.Overhead() {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-	nonce := sealed[:box.NonceSize()]
-	data, err := box.Open(nil, nonce, sealed[box.NonceSize():], nil)
-	if err != nil || len(data) == 0 || len(data) > maxQueryCursorSize || data[0] != queryCursorVersion {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-
-	database, rest, ok := readPart(data[1:])
-	if !ok {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-	index, rest, ok := readPart(rest)
-	if !ok || len(rest) == 0 {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-	op := cmpOp(rest[0])
-	rest = rest[1:]
-	value, rest, ok := readPart(rest)
-	if !ok {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-	lastValue, rest, ok := readPart(rest)
-	if !ok {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-	id, rest, ok := readPart(rest)
-	if !ok || len(rest) != 0 {
-		return queryCursor{}, errInvalidQueryCursor
-	}
-
-	cursor := queryCursor{
-		database:  string(database),
-		index:     string(index),
-		op:        op,
-		value:     bytes.Clone(value),
-		lastValue: bytes.Clone(lastValue),
-		id:        string(id),
-	}
-	if err := validateQueryCursor(cursor); err != nil {
-		return queryCursor{}, err
-	}
-
-	return cursor, nil
-}
-
-func validateQueryCursor(cursor queryCursor) error {
-	if err := validateName(cursor.database); err != nil || validateName(cursor.index) != nil || !cursor.op.valid() || !validIndexValue(cursor.value) || validateID(cursor.id) != nil {
-		return errInvalidQueryCursor
-	}
-	if cursor.op == cmpEq && len(cursor.lastValue) != 0 {
-		return errInvalidQueryCursor
-	}
-	if cursor.op != cmpEq && (!validIndexValue(cursor.lastValue) || cursor.lastValue[0] != cursor.value[0]) {
-		return errInvalidQueryCursor
-	}
-
-	return nil
-}
 
 func newQueryCipher(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)

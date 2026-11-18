@@ -48,11 +48,13 @@ xh POST localhost:8080/db/example name=KantanDB \
 # List document IDs, optionally after a cursor.
 xh GET localhost:8080/db/example limit==100 cursor==01950000-0000-7000-8000-000000000001
 
-# Query the email index. value is a JSON string; op defaults to eq.
-xh GET localhost:8080/db/example index==email value=='"alice@example.com"' limit==100
+# Query the email index. op defaults to eq.
+echo '{"index":"email","value":"alice@example.com","limit":100}' | \
+  xh QUERY localhost:8080/db/example Content-Type:application/json
 
 # Find documents whose indexed age is at least 30.
-xh GET localhost:8080/db/example index==age op==ge value==30 limit==100
+echo '{"index":"age","op":"ge","value":30,"limit":100}' | \
+  xh QUERY localhost:8080/db/example Content-Type:application/json
 
 # Query any JSONPath without putting it in the URI.
 echo '{"path":"$.age","op":"ge","value":30,"limit":100}' | \
@@ -63,7 +65,8 @@ echo '{"path":"$.age","op":"ge","value":30,"cursor":"eyJ..."}' | \
   xh QUERY localhost:8080/db/example Content-Type:application/json
 
 # Continue an index query with its opaque cursor.
-xh GET localhost:8080/db/example index==age op==ge value==30 cursor==eyJ...
+echo '{"index":"age","op":"ge","value":30,"cursor":"eyJ..."}' | \
+  xh QUERY localhost:8080/db/example Content-Type:application/json
 
 # Read a document using the returned ID.
 xh GET localhost:8080/db/example/01950000-0000-7000-8000-000000000001
@@ -110,7 +113,13 @@ same database, index, operator, and value.
 
 ### JSONPath queries
 
-Send an RFC 9535 JSONPath query in the body of `QUERY /db/{database}`. A document
+Send either `{"index":"age","op":"ge","value":30}` or a JSONPath query in the
+body of `QUERY /db/{database}`. Supply exactly one of `index` or `path`.
+A named index uses its JSON Pointer semantics, including array positions; an unknown
+index returns `404 index_not_found`. Without `index`, automatic selection and scan
+fallback remain unchanged.
+
+For an RFC 9535 JSONPath query, a document
 matches when any selected scalar satisfies the comparison.
 
 A simple path uses its declared index unless it contains a numeric token. Other

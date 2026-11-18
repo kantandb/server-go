@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/cipher"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,15 +76,6 @@ const (
 
 func (op cmpOp) valid() bool {
 	return op <= cmpGE
-}
-
-type docQuery struct {
-	value   any
-	cursor  string
-	index   string
-	op      cmpOp
-	limit   int
-	indexed bool
 }
 
 type docResponse struct {
@@ -390,51 +380,9 @@ func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ids []string
-	var encoded []byte
-	var lastValue []byte
-	var box cipher.AEAD
-	var more bool
-	var err error
-	if query.indexed {
-		var key []byte
-		key, err = a.store.cursorKey(database)
-		if err == nil {
-			box, err = newQueryCipher(key)
-		}
-
-		var cursor string
-		if err == nil {
-			encoded, lastValue, cursor, err = queryStart(box, database, query)
-		}
-		if errors.Is(err, errInvalidQueryCursor) {
-			writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
-
-			return
-		}
-		if err == nil {
-			if query.op == cmpEq {
-				ids, more, err = a.store.queryDocsCtx(r.Context(), database, query.index, encoded, query.limit, cursor)
-			} else {
-				page, queryErr := a.store.queryRangePage(r.Context(), database, query.index, query.op, encoded, query.limit, lastValue, cursor)
-				ids, lastValue, more, err = page.ids, page.lastValue, page.more, queryErr
-			}
-		}
-	} else {
-		ids, more, err = a.store.listDocs(database, query.limit, query.cursor)
-	}
+	ids, more, err := a.store.listDocs(database, query.limit, query.cursor)
 	if errors.Is(err, errDBNotFound) {
 		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
-
-		return
-	}
-	if errors.Is(err, errIndexNotFound) {
-		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
-
-		return
-	}
-	if errors.Is(err, errInvalidIndexValue) {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
 		return
 	}
@@ -443,20 +391,12 @@ func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-
 	if ids == nil {
 		ids = []string{}
 	}
 
 	cursor := ""
-	if more && query.indexed {
-		cursor, err = encodeQueryCursor(box, queryCursor{database: database, index: query.index, op: query.op, value: encoded, lastValue: lastValue, id: ids[len(ids)-1]})
-		if err != nil {
-			a.fail(w, r, "encode query cursor", err)
-
-			return
-		}
-	} else if more {
+	if more {
 		cursor = ids[len(ids)-1]
 	}
 
@@ -507,7 +447,12 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	plan, err := a.store.planPathQuery(database, query.path)
+	plan, err := a.store.planQuery(database, query)
+	if errors.Is(err, errIndexNotFound) {
+		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
+
+		return
+	}
 	if errors.Is(err, errInvalidPath) {
 		writeError(w, http.StatusBadRequest, "invalid_query", "Path is invalid")
 
@@ -559,109 +504,44 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, docList{Documents: ids, Cursor: cursor})
 }
 
-func queryStart(box cipher.AEAD, database string, query docQuery) ([]byte, []byte, string, error) {
-	encoded, err := encodeIndexValue(query.value)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	if query.cursor == "" {
-		return encoded, nil, "", nil
-	}
-
-	cursor, err := decodeQueryCursor(box, query.cursor)
-	if err != nil || cursor.database != database || cursor.index != query.index || cursor.op != query.op || !bytes.Equal(cursor.value, encoded) {
-		return nil, nil, "", errInvalidQueryCursor
-	}
-
-	return encoded, cursor.lastValue, cursor.id, nil
+type listQuery struct {
+	limit  int
+	cursor string
 }
 
-func parseDocQuery(w http.ResponseWriter, r *http.Request) (docQuery, bool) {
+func parseDocQuery(w http.ResponseWriter, r *http.Request) (listQuery, bool) {
 	values, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
-		return docQuery{}, false
+		return listQuery{}, false
 	}
 	for name, entries := range values {
-		if name != "limit" && name != "cursor" && name != "index" && name != "op" && name != "value" || len(entries) != 1 {
+		if name != "limit" && name != "cursor" || len(entries) != 1 {
 			writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 
-			return docQuery{}, false
+			return listQuery{}, false
 		}
 	}
 
-	query := docQuery{op: cmpEq, limit: defaultListLimit}
+	query := listQuery{limit: defaultListLimit}
 	if entries, ok := values["limit"]; ok {
 		limit, err := strconv.Atoi(entries[0])
 		if err != nil || limit < 1 || limit > maxListLimit {
 			writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
 
-			return docQuery{}, false
+			return listQuery{}, false
 		}
 		query.limit = limit
 	}
 	if entries, ok := values["cursor"]; ok {
 		query.cursor = entries[0]
 	}
+	if query.cursor != "" && validateID(query.cursor) != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
 
-	indexes, hasIndex := values["index"]
-	rawValues, hasValue := values["value"]
-	ops, hasOp := values["op"]
-	if hasIndex != hasValue {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Index and value must appear together")
-
-		return docQuery{}, false
+		return listQuery{}, false
 	}
-	if hasOp && !hasIndex {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Operator requires index and value")
-
-		return docQuery{}, false
-	}
-	if !hasIndex {
-		if query.cursor != "" {
-			if err := validateID(query.cursor); err != nil {
-				writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
-
-				return docQuery{}, false
-			}
-		}
-
-		return query, true
-	}
-	if err := validateName(indexes[0]); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Index is invalid")
-
-		return docQuery{}, false
-	}
-
-	value, err := decodeQueryValue(rawValues[0])
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Value must be one JSON scalar")
-
-		return docQuery{}, false
-	}
-	if hasOp {
-		var ok bool
-		query.op, ok = parseCmpOp(ops[0])
-		if !ok {
-			writeError(w, http.StatusBadRequest, "invalid_query", "Operator is invalid")
-
-			return docQuery{}, false
-		}
-	}
-	if query.op != cmpEq {
-		switch value.(type) {
-		case nil, bool:
-			writeError(w, http.StatusBadRequest, "invalid_query", "Operator does not support this value")
-
-			return docQuery{}, false
-		}
-	}
-
-	query.index = indexes[0]
-	query.value = value
-	query.indexed = true
 
 	return query, true
 }
@@ -680,27 +560,6 @@ func parseCmpOp(raw string) (cmpOp, bool) {
 		return cmpGE, true
 	default:
 		return cmpEq, false
-	}
-}
-
-func decodeQueryValue(raw string) (any, error) {
-	decoder := json.NewDecoder(strings.NewReader(raw))
-	decoder.UseNumber()
-
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, errors.New("multiple JSON values")
-	}
-
-	switch value.(type) {
-	case nil, bool, json.Number, string:
-		return value, nil
-	default:
-		return nil, errors.New("value must be scalar")
 	}
 }
 

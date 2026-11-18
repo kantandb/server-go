@@ -1,6 +1,6 @@
 # Query language
 
-Documents are queried with `GET /db/{database}` or `QUERY /db/{database}`. The response contains document IDs, not the document bodies:
+List documents with `GET /db/{database}`. Filter documents with `QUERY /db/{database}`. The response contains document IDs, not the document bodies:
 
 ```json
 {
@@ -13,20 +13,23 @@ Fetch a returned document with `GET /db/{database}/{id}`.
 
 ## Query forms
 
-There are three query forms:
+These query forms are available:
 
 ```text
 GET /db/users
     List every document ID in users.
-
-GET /db/users?index=email&value=%22alice%40example.com%22
-    Find IDs through the email secondary index.
 
 QUERY /db/users
 Content-Type: application/json
 
 {"path":"$.profile.age","op":"ge","value":18}
     Find IDs through an RFC 9535 JSONPath.
+
+QUERY /db/users
+Content-Type: application/json
+
+{"index":"email","value":"alice@example.com"}
+    Find IDs through the named secondary index.
 ```
 
 An indexed query has one condition:
@@ -35,48 +38,37 @@ An indexed query has one condition:
 index <operator> JSON scalar
 ```
 
-The URL parameters are:
-
-| Parameter | Meaning                                | Default |
-| --------- | -------------------------------------- | ------- |
-| `index`   | Secondary-index name                   | none    |
-| `value`   | One JSON scalar to compare             | none    |
-| `op`      | `eq`, `lt`, `le`, `gt`, or `ge`        | `eq`    |
-| `limit`   | Page size from 1 to 1000               | 100     |
-| `cursor`  | Position returned by the previous page | empty   |
-
-`index` and `value` must appear together. `op` is only valid with them. Unknown or repeated parameters are rejected.
+GET listing accepts only `limit` (1 to 1000, default 100) and `cursor` (the last document ID from the previous page). Unknown or repeated parameters are rejected. Filters belong in QUERY bodies.
 
 A QUERY request has no URI parameters. Its JSON body has these fields:
 
 | Field    | Meaning                                | Default  |
 | -------- | -------------------------------------- | -------- |
-| `path`   | RFC 9535 JSONPath                      | required |
+| `index`  | Secondary-index name                   | none     |
+| `path`   | RFC 9535 JSONPath                      | none     |
 | `value`  | One JSON scalar to compare             | required |
 | `op`     | `eq`, `lt`, `le`, `gt`, or `ge`        | `eq`     |
 | `limit`  | Page size from 1 to 1000               | 100      |
 | `cursor` | Position returned by the previous page | empty    |
 
+Supply exactly one of `index` or `path`. Named-index queries use the index's JSON Pointer semantics, including array positions and numeric object properties. An unknown index returns `404 index_not_found`. Path queries keep automatic index selection and scan fallback.
+
 The body must use `Content-Type: application/json`. Unknown or duplicate fields, trailing JSON, and URI parameters are rejected. QUERY responses use `Cache-Control: no-store`. Collection responses advertise the format with `Accept-Query: application/json`.
 
 ## Values and operators
 
-`value` uses JSON syntax, then URL encoding. This distinction matters for strings:
+`value` is a JSON scalar in the request body. Strings need JSON quotes:
 
-```text
-value=true                    JSON boolean
-value=34                      JSON number
-value=null                    JSON null
-value=%22alice%40example.com%22
-                              JSON string "alice@example.com"
+```json
+{"index":"email","value":"alice@example.com"}
 ```
 
-With `curl`, `--data-urlencode` avoids manual encoding:
+With `curl`, send the JSON body with the QUERY method:
 
 ```sh
-curl --get http://localhost:8080/db/users \
-  --data index=email \
-  --data-urlencode 'value="alice@example.com"'
+curl -X QUERY http://localhost:8080/db/users \
+  -H 'Content-Type: application/json' \
+  --data '{"index":"email","value":"alice@example.com"}'
 ```
 
 Equality (`eq`) accepts strings, numbers, booleans, and `null`. Range operators work only with strings and numbers:
@@ -98,13 +90,16 @@ JSONPath returns a list of nodes. A document matches a QUERY request when at lea
 ## Examples
 
 ```text
-GET /db/users?index=active&value=true
+QUERY /db/users
+{"index":"active","value":true}
     Users whose indexed active field is true.
 
-GET /db/users?index=age&op=ge&value=18
+QUERY /db/users
+{"index":"age","op":"ge","value":18}
     Users whose indexed age is at least 18.
 
-GET /db/users?index=name&op=lt&value=%22m%22
+QUERY /db/users
+{"index":"name","op":"lt","value":"m"}
     Users whose indexed name sorts before "m".
 
 GET /db/users?limit=25
@@ -138,8 +133,8 @@ A simple JSONPath is translated to JSON Pointer. If it matches a declared index,
 
 If more results exist, `cursor` is non-empty. Send it back with the same query. The final page returns an empty cursor. A cursor does not identify a fixed snapshot across requests, so writes between pages can change later results.
 
-For an unfiltered list, the cursor is the last document ID. For an indexed query, it is an opaque, authenticated token tied to the database, index, operator, and value. Do not inspect or modify it. Indexed cursors are also tied to the running server process and become invalid after a restart.
+For an unfiltered list, the cursor is the last document ID.
 
-QUERY cursors are opaque and authenticated. They bind the method, database, normalized path, operator, value, chosen order, and scan position. Send one only with the same request body, apart from `limit`. A cursor stays valid after restart but becomes invalid if the database is deleted and recreated.
+QUERY cursors are opaque and authenticated. They bind the method, database, index, normalized path when supplied, operator, value, chosen order, and scan position. Send one only with the same request body, apart from `limit`. A cursor stays valid after restart but becomes invalid if the database is deleted and recreated.
 
 QUERY bodies are limited to 64 KiB. Paths are limited to 256 bytes, 16 levels of bracket or parenthesis nesting, and 32 top-level segments. To bound evaluation, paths may contain at most one descendant segment and one selector per segment. A document may contain at most 1,000,000 JSON nodes for scan evaluation.

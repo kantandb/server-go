@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble"
@@ -39,7 +37,7 @@ func TestQueryDocumentsHTTP(t *testing.T) {
 	}
 	slices.Sort(active)
 
-	res = sendRequest(t, server, http.MethodGet, "/db/users?index=active&value=true&op=eq&limit=3", "", "")
+	res = sendRequest(t, server, queryMethod, "/db/users", `{"index":"active","value":true,"op":"eq","limit":3}`, "application/json")
 	var exact docList
 	if err := json.NewDecoder(res.Body).Decode(&exact); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -54,7 +52,7 @@ func TestQueryDocumentsHTTP(t *testing.T) {
 		t.Errorf("exact-limit cursor = %q, want empty", exact.Cursor)
 	}
 
-	res = sendRequest(t, server, http.MethodGet, "/db/users?index=active&value=true&limit=1", "", "")
+	res = sendRequest(t, server, queryMethod, "/db/users", `{"index":"active","value":true,"limit":1}`, "application/json")
 	var page docList
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -72,20 +70,20 @@ func TestQueryDocumentsHTTP(t *testing.T) {
 		t.Error("query cursor exposes the document ID")
 	}
 
-	cursor := url.QueryEscape(page.Cursor)
-	res = sendRequest(t, server, http.MethodGet, "/db/users?index=active&value=false&cursor="+cursor, "", "")
+	cursor := page.Cursor
+	res = sendRequest(t, server, queryMethod, "/db/users", `{"index":"active","value":false,"cursor":"`+cursor+`"}`, "application/json")
 	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 
 	res = sendRequest(t, server, http.MethodPost, "/db", `{"name":"others","indexes":[{"name":"active","path":"/active"}]}`, "application/json")
 	checkResponse(t, res, http.StatusCreated, `{"name":"others","indexes":[{"name":"active","path":"/active"}]}`)
-	res = sendRequest(t, server, http.MethodGet, "/db/others?index=active&value=true&cursor="+cursor, "", "")
+	res = sendRequest(t, server, queryMethod, "/db/others", `{"index":"active","value":true,"cursor":"`+cursor+`"}`, "application/json")
 	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 
 	res = sendRequest(t, server, http.MethodDelete, "/db/users/"+active[0], "", "")
 	checkResponse(t, res, http.StatusNoContent, "")
 
-	path := "/db/users?index=active&value=true&limit=1&cursor=" + cursor
-	res = sendRequest(t, server, http.MethodGet, path, "", "")
+	body := `{"index":"active","value":true,"limit":1,"cursor":"` + cursor + `"}`
+	res = sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
 	page = docList{}
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -100,8 +98,8 @@ func TestQueryDocumentsHTTP(t *testing.T) {
 		t.Error("cursor is empty on middle page")
 	}
 
-	path = "/db/users?index=active&value=true&limit=1&cursor=" + url.QueryEscape(page.Cursor)
-	res = sendRequest(t, server, http.MethodGet, path, "", "")
+	body = `{"index":"active","value":true,"limit":1,"cursor":"` + page.Cursor + `"}`
+	res = sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
 	page = docList{}
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -155,8 +153,8 @@ func TestQueryScalarValuesHTTP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := "/db/values?index=value&value=" + url.QueryEscape(tt.raw)
-			res := sendRequest(t, server, http.MethodGet, path, "", "")
+			body := `{"index":"value","value":` + tt.raw + `}`
+			res := sendRequest(t, server, queryMethod, "/db/values", body, "application/json")
 
 			var page docList
 			if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
@@ -175,8 +173,8 @@ func TestQueryScalarValuesHTTP(t *testing.T) {
 		})
 	}
 
-	path := "/db/values?index=value&value=" + url.QueryEscape(`"ignored"`)
-	res = sendRequest(t, server, http.MethodGet, path, "", "")
+	body := `{"index":"value","value":"ignored"}`
+	res = sendRequest(t, server, queryMethod, "/db/values", body, "application/json")
 	checkResponse(t, res, http.StatusOK, `{"documents":[],"cursor":""}`)
 }
 
@@ -196,7 +194,7 @@ func TestRangeQueryHTTP(t *testing.T) {
 	}
 	slices.Sort(want)
 
-	res = sendRequest(t, server, http.MethodGet, "/db/scores?index=score&op=ge&value=10&limit=1", "", "")
+	res = sendRequest(t, server, queryMethod, "/db/scores", `{"index":"score","op":"ge","value":10,"limit":1}`, "application/json")
 	var first docList
 	if err := json.NewDecoder(res.Body).Decode(&first); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -208,8 +206,8 @@ func TestRangeQueryHTTP(t *testing.T) {
 		t.Errorf("first page = %+v, want documents %v and cursor", first, want[:1])
 	}
 
-	cursor := url.QueryEscape(first.Cursor)
-	res = sendRequest(t, server, http.MethodGet, "/db/scores?index=score&op=ge&value=10&limit=1&cursor="+cursor, "", "")
+	cursor := first.Cursor
+	res = sendRequest(t, server, queryMethod, "/db/scores", `{"index":"score","op":"ge","value":10,"limit":1,"cursor":"`+cursor+`"}`, "application/json")
 	var last docList
 	if err := json.NewDecoder(res.Body).Decode(&last); err != nil {
 		t.Fatalf("Decode() error = %v", err)
@@ -221,18 +219,18 @@ func TestRangeQueryHTTP(t *testing.T) {
 		t.Errorf("last page = %+v, want documents %v and no cursor", last, want[1:])
 	}
 
-	for _, path := range []string{
-		"/db/scores?index=score&op=gt&value=10&limit=1&cursor=" + cursor,
-		"/db/scores?index=score&op=ge&value=11&limit=1&cursor=" + cursor,
-		"/db/scores?index=rank&op=ge&value=10&limit=1&cursor=" + cursor,
+	for _, body := range []string{
+		`{"index":"score","op":"gt","value":10,"limit":1,"cursor":"` + cursor + `"}`,
+		`{"index":"score","op":"ge","value":11,"limit":1,"cursor":"` + cursor + `"}`,
+		`{"index":"rank","op":"ge","value":10,"limit":1,"cursor":"` + cursor + `"}`,
 	} {
-		res = sendRequest(t, server, http.MethodGet, path, "", "")
+		res = sendRequest(t, server, queryMethod, "/db/scores", body, "application/json")
 		checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 	}
 
 	res = sendRequest(t, server, http.MethodPost, "/db", `{"name":"other","indexes":[{"name":"score","path":"/score"}]}`, "application/json")
 	checkResponse(t, res, http.StatusCreated, `{"name":"other","indexes":[{"name":"score","path":"/score"}]}`)
-	res = sendRequest(t, server, http.MethodGet, "/db/other?index=score&op=ge&value=10&limit=1&cursor="+cursor, "", "")
+	res = sendRequest(t, server, queryMethod, "/db/other", `{"index":"score","op":"ge","value":10,"limit":1,"cursor":"`+cursor+`"}`, "application/json")
 	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 }
 
@@ -282,8 +280,8 @@ func TestRangeSemanticsHTTP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := "/db/values?index=value&op=" + tt.op + "&value=" + url.QueryEscape(tt.value)
-			res := sendRequest(t, server, http.MethodGet, path, "", "")
+			body := `{"index":"value","op":"` + tt.op + `","value":` + tt.value + `}`
+			res := sendRequest(t, server, queryMethod, "/db/values", body, "application/json")
 
 			var page docList
 			if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
@@ -315,11 +313,8 @@ func TestRangeValueOrderHTTP(t *testing.T) {
 	var documents []string
 	cursor := ""
 	for range want {
-		path := "/db/values?index=value&op=ge&value=10&limit=1"
-		if cursor != "" {
-			path += "&cursor=" + url.QueryEscape(cursor)
-		}
-		res = sendRequest(t, server, http.MethodGet, path, "", "")
+		body := `{"index":"value","op":"ge","value":10,"limit":1,"cursor":"` + cursor + `"}`
+		res = sendRequest(t, server, queryMethod, "/db/values", body, "application/json")
 
 		var page docList
 		if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
@@ -362,49 +357,41 @@ func TestParseCmpOp(t *testing.T) {
 	}
 }
 
-func TestQueryDocumentsValidationHTTP(t *testing.T) {
+func TestGetRejectsFilteringHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"users","indexes":[{"name":"active","path":"/active"}]}`, "application/json")
-	checkResponse(t, res, http.StatusCreated, `{"name":"users","indexes":[{"name":"active","path":"/active"}]}`)
-
-	tests := []struct {
-		path   string
-		status int
-		code   string
-	}{
-		{path: "/db/users?index=active", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?value=true", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?op=eq", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true&op=bad", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true&op=eq&op=eq", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true&op=lt", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=false&op=le", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=null&op=gt", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=null&op=ge", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=Bad&value=true", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active;value=true", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true+false", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=%5B%5D", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=%7B%7D", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true&cursor=bad", status: http.StatusBadRequest, code: "invalid_cursor"},
-		{path: "/db/users?index=active&index=active&value=true", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=active&value=true&value=false", status: http.StatusBadRequest, code: "invalid_query"},
-		{path: "/db/users?index=missing&value=true", status: http.StatusNotFound, code: "index_not_found"},
-		{path: "/db/missing?index=active&value=true", status: http.StatusNotFound, code: "database_not_found"},
-		{path: "/db/users?index=active&value=" + url.QueryEscape(`"`+strings.Repeat("x", maxIndexValue)+`"`), status: http.StatusBadRequest, code: "invalid_query"},
+	for _, params := range []string{
+		"index=active", "value=true", "op=eq",
+		"index=active&value=true", "index=active&value=true&op=eq",
+		"index=missing&value=true", "index=&value=",
+		"limit=10&index=active&value=true",
+	} {
+		res := sendRequest(t, server, http.MethodGet, "/db/users?"+params, "", "")
+		checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_query","message":"Query is invalid"}}`)
 	}
-	for _, tt := range tests {
-		res = sendRequest(t, server, http.MethodGet, tt.path, "", "")
-		body := readResponse(t, res)
-		if res.StatusCode != tt.status {
-			t.Errorf("GET %s status = %d, want %d; body = %s", tt.path, res.StatusCode, tt.status, body)
-		}
-		if !strings.Contains(body, `"code":"`+tt.code+`"`) {
-			t.Errorf("GET %s body = %s, want code %q", tt.path, body, tt.code)
-		}
+}
+
+func TestNamedQueryValidationHTTP(t *testing.T) {
+	t.Parallel()
+
+	server := newTestServer(t, defaultMaxBodyBytes)
+	for _, body := range []string{
+		`{"index":"active","value":true,"op":"bad"}`,
+		`{"index":"active","value":true,"op":"eq","op":"eq"}`,
+		`{"index":"active","value":true,"op":"lt"}`,
+		`{"index":"active","value":false,"op":"le"}`,
+		`{"index":"active","value":null,"op":"gt"}`,
+		`{"index":"active","value":null,"op":"ge"}`,
+		`{"index":"Bad","value":true}`,
+		`{"index":"active","value":[]}`,
+		`{"index":"active","value":{}}`,
+		`{"index":"active","index":"active","value":true}`,
+		`{"index":"active","value":true,"value":false}`,
+		`{"index":"active","value":true} false`,
+	} {
+		res := sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
+		checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_query","message":"Query body is invalid"}}`)
 	}
 }
 
@@ -434,8 +421,8 @@ func TestQueryCorruptIndexHTTP(t *testing.T) {
 
 			server := httptest.NewServer(newHandler(store, defaultMaxBodyBytes))
 			t.Cleanup(server.Close)
-			path := "/db/dbname?index=name&value=" + url.QueryEscape(`"value"`)
-			res := sendRequest(t, server, http.MethodGet, path, "", "")
+			body := `{"index":"name","value":"value"}`
+			res := sendRequest(t, server, queryMethod, "/db/dbname", body, "application/json")
 			checkResponse(t, res, http.StatusInternalServerError, `{"error":{"code":"corrupt_data","message":"Stored data is corrupt"}}`)
 		})
 	}

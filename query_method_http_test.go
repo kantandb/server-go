@@ -88,7 +88,7 @@ func TestPathQueryUsesIndexHTTP(t *testing.T) {
 		checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 	}
 
-	res = sendRequest(t, server, http.MethodGet, "/db/scores?index=score&op=ge&value=10&cursor="+url.QueryEscape(first.Cursor), "", "")
+	res = sendRequest(t, server, http.MethodGet, "/db/scores?cursor="+url.QueryEscape(first.Cursor), "", "")
 	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
 
 	body = `{"path":"$['score']","op":"ge","value":10,"limit":1,"cursor":"` + first.Cursor + `"}`
