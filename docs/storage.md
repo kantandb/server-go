@@ -58,9 +58,9 @@ nonce (12) | encrypted Zstandard data | GCM tag (16)
 
 Suite 1 uses Zstandard, HKDF-SHA256, and AES-256-GCM. The exact Pebble key and visible header are authenticated as associated data. Changing the database name, ID, revision, size, nonce, ciphertext, or tag makes the record unreadable.
 
-KantanDB authenticates the header before trusting the original length. Decompression has a 64 MiB output limit and must produce exactly the authenticated length. Listing IDs checks only the fixed envelope shape; it does not decrypt each body.
+KantanDB authenticates the header before trusting the original length. Decompression has a 64 MiB output limit and must produce exactly the authenticated length. Counting documents for database information checks only the fixed envelope shape; it does not decrypt each body.
 
-This key space is the primary index. There is no separate ID lookup table. Scanning `0x02 | database | 0x00` lists IDs in byte order. UUIDv7 IDs normally sort by creation time. The random revision is the document ETag.
+This key space is the primary index. There is no separate ID lookup table. Scanning `0x02 | database | 0x00` lists documents in byte order. UUIDv7 IDs normally sort by creation time. The random revision is the document ETag.
 
 ## Secondary indexes
 
@@ -85,9 +85,9 @@ A query scans the matching index-key range, extracts each document ID, and check
 
 ## JSONPath queries
 
-A QUERY request uses an existing secondary index when its singular JSONPath translates exactly to that index's JSON Pointer. Otherwise, KantanDB scans encrypted document records in ID order under a Pebble snapshot. It decrypts each record, evaluates JSONPath, and compares each selected scalar with the requested value.
+An empty QUERY filter lists documents. A named-index filter uses that index directly. A JSONPath filter uses an existing secondary index when its singular path translates exactly to that index's JSON Pointer. Otherwise, KantanDB scans encrypted document records in ID order under a Pebble snapshot. It decrypts each record, evaluates JSONPath, and compares each selected scalar with the requested value.
 
-A scan examines at most 10,000 records per page. Its authenticated cursor records the last examined ID, including when no document matched. Indexed QUERY cursors record the encoded value and document ID. Both cursor forms bind the normalized JSONPath and selected execution order.
+Each QUERY result contains the ID, unquoted revision, and document body. Matching and body reads use the same snapshot. A scan examines at most 10,000 records per page. Its authenticated cursor records the last examined ID, including when no document matched. Indexed QUERY cursors record the encoded value and document ID. Both cursor forms bind the normalized JSONPath and selected execution order.
 
 ## How range queries work
 

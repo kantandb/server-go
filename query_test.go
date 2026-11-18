@@ -142,18 +142,32 @@ func TestPathQueryScanLimits(t *testing.T) {
 		}
 	}
 	path := jsonpath.MustParse(`$.missing`)
-
-	page, err := store.queryPathDocs(context.Background(), "users", path, cmpEq, true, 10, 1, "")
+	key, err := store.databaseKey("users")
 	if err != nil {
-		t.Fatalf("queryPathDocs() error = %v", err)
+		t.Fatal(err)
 	}
-	if len(page.ids) != 0 || !page.more || page.lastID != indexTestIDA {
+	defer clear(key)
+	snapshot := store.db.NewSnapshot()
+	defer func() {
+		if err := snapshot.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+
+	plan := pathPlan{path: path}
+	query := pathQuery{op: cmpEq, value: true, limit: 10}
+	encoded := valueForCursor(t, true)
+	page, err := queryResultPage(context.Background(), snapshot, key, "users", plan, query, encoded, pathCursor{}, maxQueryBytes, 1)
+	if err != nil {
+		t.Fatalf("queryResultPage() error = %v", err)
+	}
+	if len(page.docs) != 0 || !page.more || page.lastID != indexTestIDA {
 		t.Errorf("page = %+v, want bounded scan cursor at first ID", page)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = store.queryPathDocs(ctx, "users", path, cmpEq, true, 10, 1, "")
+	_, err = queryResultPage(ctx, snapshot, key, "users", plan, query, encoded, pathCursor{}, maxQueryBytes, 1)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled query error = %v, want context canceled", err)
 	}

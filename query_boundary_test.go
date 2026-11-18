@@ -61,7 +61,7 @@ func TestPathQuerySemanticsHTTP(t *testing.T) {
 			}
 
 			res := sendRequest(t, server, queryMethod, "/db/values", string(body), "application/json")
-			var got docList
+			var got idPage
 			if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
 				t.Fatalf("Decode() error = %v", err)
 			}
@@ -87,7 +87,7 @@ func TestPathQueryIsSafeHTTP(t *testing.T) {
 	body := `{"path":"$.active","value":true}`
 	for range 2 {
 		res = sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
-		checkResponse(t, res, http.StatusOK, `{"documents":["`+id+`"],"cursor":""}`)
+		checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+id+`"],"cursor":""}`)
 	}
 
 	res = sendRequest(t, server, http.MethodGet, "/db/users/"+id, "", "")
@@ -136,5 +136,5 @@ func TestQueryThroughReverseProxy(t *testing.T) {
 	}
 
 	res = sendRequest(t, server, queryMethod, "/db/users", `{"path":"$.active","value":true}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+id+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+id+`"],"cursor":""}`)
 }

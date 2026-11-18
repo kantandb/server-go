@@ -97,7 +97,7 @@ paths:
               withIndexes:
                 value:
                   name: users
-                  indexes:
+                  indices:
                     - name: email
                       path: /email
       responses:
@@ -129,31 +129,26 @@ paths:
       - $ref: "#/components/parameters/Database"
 
     get:
-      tags: [Documents]
-      operationId: listDocuments
-      summary: List document IDs
+      tags: [Databases]
+      operationId: getDatabase
+      summary: Get database information
       description: |
-        Lists document IDs in ID order. Only limit and cursor parameters are
-        accepted. Unknown or repeated parameters are rejected. Use QUERY to filter.
-      externalDocs:
-        description: Query language
-        url: docs/query-language.md
-      parameters:
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/DocumentCursor"
+        Returns the database name, index definitions, and exact document count.
+        The count scans primary records without decrypting bodies.
+        URI query parameters are rejected. Use QUERY to list or filter documents.
       responses:
         "200":
-          description: A page of document IDs.
+          description: Database information, including empty indexes and zero counts.
           headers:
             Accept-Query:
               $ref: "#/components/headers/AcceptQuery"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DocumentList"
+                $ref: "#/components/schemas/DatabaseInfo"
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: The database name, query, limit, or cursor is invalid.
+          description: The database name is invalid or URI query parameters were supplied.
         "404":
           $ref: "#/components/responses/NotFound"
           description: The database does not exist.
@@ -205,11 +200,13 @@ paths:
     query:
       tags: [Documents]
       operationId: queryDocuments
-      summary: Query document IDs by index or JSONPath
+      summary: List or filter documents
       description: |
-        Selects documents by a named index or an RFC 9535 JSONPath supplied in
-        the request body. Supply exactly one of index or path. Named indexes
-        use JSON Pointer semantics; paths use automatic index selection or scans.
+        An empty JSON object lists all documents. Optional limit and cursor fields
+        paginate the list. For a filter, supply exactly one of index or path and
+        a value. Named indexes use JSON Pointer semantics; paths use automatic
+        index selection or scans. Results contain id, rev, and doc from one snapshot.
+        Pages have an 8 MiB serialized-record budget but always permit one record.
         URI query parameters, unknown or duplicate fields, and trailing
         JSON are rejected. Equality accepts any JSON scalar. Ordering accepts
         only JSON numbers and strings. Requests are limited to 64 KiB and five
@@ -230,7 +227,7 @@ paths:
               limit: 100
       responses:
         "200":
-          description: A page of matching document IDs.
+          description: A page of documents with IDs and unquoted revisions.
           headers:
             Accept-Query:
               $ref: "#/components/headers/AcceptQuery"
@@ -557,11 +554,26 @@ components:
       properties:
         name:
           $ref: "#/components/schemas/Name"
-        indexes:
+        indices:
           type: array
           maxItems: 16
           items:
             $ref: "#/components/schemas/Index"
+
+    DatabaseInfo:
+      type: object
+      additionalProperties: false
+      required: [name, indices, doc_count]
+      properties:
+        name:
+          $ref: "#/components/schemas/Name"
+        indices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Index"
+        doc_count:
+          type: integer
+          minimum: 0
 
     DatabaseList:
       type: object
@@ -581,10 +593,24 @@ components:
         documents:
           type: array
           items:
-            $ref: "#/components/schemas/DocumentID"
+            $ref: "#/components/schemas/DocumentRecord"
         cursor:
           type: string
           description: Empty on the final page; otherwise pass it unchanged to the next request.
+
+    DocumentRecord:
+      type: object
+      additionalProperties: false
+      required: [id, rev, doc]
+      properties:
+        id:
+          $ref: "#/components/schemas/DocumentID"
+        rev:
+          type: string
+          description: Current ETag value without quotes. Add quotes for If-Match.
+          pattern: "^[0-9a-f]{32}$"
+        doc:
+          $ref: "#/components/schemas/Document"
 
     DocumentCreated:
       type: object
@@ -617,18 +643,23 @@ components:
     PathQuery:
       type: object
       additionalProperties: false
-      required: [value]
       oneOf:
-        - required: [path]
+        - required: [path, value]
           not:
             required: [index]
-        - required: [index]
+        - required: [index, value]
           not:
             required: [path]
+        - not:
+            anyOf:
+              - required: [index]
+              - required: [path]
+              - required: [op]
+              - required: [value]
       properties:
         index:
           type: string
-          description: Index name. Supply exactly one of index or path.
+          description: Index name. For a filter, supply exactly one of index or path.
           pattern: "^[a-z][a-z0-9_-]{0,62}$"
         path:
           type: string
@@ -777,13 +808,6 @@ components:
       description: Database name returned as the previous page position.
       schema:
         $ref: "#/components/schemas/Name"
-
-    DocumentCursor:
-      name: cursor
-      in: query
-      description: Last document ID returned as the previous page position.
-      schema:
-        type: string
 
     IfMatch:
       name: If-Match

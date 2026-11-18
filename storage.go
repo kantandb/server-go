@@ -889,21 +889,6 @@ func (s *store) databaseKey(name string) (key []byte, readErr error) {
 	return key, nil
 }
 
-func (s *store) cursorKey(name string) ([]byte, error) {
-	databaseKey, err := s.databaseKey(name)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(databaseKey)
-
-	key, err := deriveCursorKey(databaseKey)
-	if err != nil {
-		return nil, fmt.Errorf("deriving cursor key: %w", err)
-	}
-
-	return key, nil
-}
-
 func makeRevision(previous *revision) (revision, error) {
 	for {
 		var rev revision

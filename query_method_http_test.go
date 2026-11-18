@@ -28,7 +28,7 @@ func TestPathQueryHTTP(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 
-	var page docList
+	var page idPage
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -41,11 +41,11 @@ func TestPathQueryHTTP(t *testing.T) {
 
 	body = `{"path":"$.profile.age","op":"ge","value":30,"limit":1,"cursor":"` + page.Cursor + `"}`
 	res = sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+third+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+third+`"],"cursor":""}`)
 
 	body = `{"path":"$.tags[*]","value":"staff"}`
 	res = sendRequest(t, server, queryMethod, "/db/users", body, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+first+`","`+second+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+first+`","`+second+`"],"cursor":""}`)
 
 	res = sendRequest(t, server, http.MethodGet, "/db/users", "", "")
 	if got := res.Header.Get("Accept-Query"); got != "application/json" {
@@ -60,15 +60,15 @@ func TestPathQueryUsesIndexHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"scores","indexes":[{"name":"score","path":"/score"}]}`, "application/json")
-	checkResponse(t, res, http.StatusCreated, `{"name":"scores","indexes":[{"name":"score","path":"/score"}]}`)
+	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"scores","indices":[{"name":"score","path":"/score"}]}`, "application/json")
+	checkResponse(t, res, http.StatusCreated, `{"name":"scores","indices":[{"name":"score","path":"/score"}]}`)
 
 	twenty := createQueryDoc(t, server, "/db/scores", `{"score":20}`)
 	ten := createQueryDoc(t, server, "/db/scores", `{"score":10}`)
 
 	body := `{"path":"$.score","op":"ge","value":10,"limit":1}`
 	res = sendRequest(t, server, queryMethod, "/db/scores", body, "application/json")
-	var first docList
+	var first idPage
 	if err := json.NewDecoder(res.Body).Decode(&first); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -89,28 +89,28 @@ func TestPathQueryUsesIndexHTTP(t *testing.T) {
 	}
 
 	res = sendRequest(t, server, http.MethodGet, "/db/scores?cursor="+url.QueryEscape(first.Cursor), "", "")
-	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_cursor","message":"Cursor is invalid"}}`)
+	checkResponse(t, res, http.StatusBadRequest, `{"error":{"code":"invalid_query","message":"URI query parameters are not supported"}}`)
 
 	body = `{"path":"$['score']","op":"ge","value":10,"limit":1,"cursor":"` + first.Cursor + `"}`
 	res = sendRequest(t, server, queryMethod, "/db/scores", body, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+twenty+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+twenty+`"],"cursor":""}`)
 }
 
 func TestPathQueryNumericTokenHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"stock","indexes":[{"name":"sku","path":"/items/0/sku"}]}`, "application/json")
-	checkResponse(t, res, http.StatusCreated, `{"name":"stock","indexes":[{"name":"sku","path":"/items/0/sku"}]}`)
+	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"stock","indices":[{"name":"sku","path":"/items/0/sku"}]}`, "application/json")
+	checkResponse(t, res, http.StatusCreated, `{"name":"stock","indices":[{"name":"sku","path":"/items/0/sku"}]}`)
 
 	arrayID := createQueryDoc(t, server, "/db/stock", `{"items":[{"sku":"match"}]}`)
 	objectID := createQueryDoc(t, server, "/db/stock", `{"items":{"0":{"sku":"match"}}}`)
 
 	res = sendRequest(t, server, queryMethod, "/db/stock", `{"path":"$.items[0].sku","value":"match"}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+arrayID+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+arrayID+`"],"cursor":""}`)
 
 	res = sendRequest(t, server, queryMethod, "/db/stock", `{"path":"$.items['0'].sku","value":"match"}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
 }
 
 func TestPathQueryLongCursorHTTP(t *testing.T) {
@@ -139,7 +139,7 @@ func TestPathQueryLongCursorHTTP(t *testing.T) {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 	res = sendRequest(t, server, queryMethod, "/db/deep", string(body), "application/json")
-	var page docList
+	var page idPage
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestPathQueryLongCursorHTTP(t *testing.T) {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 	res = sendRequest(t, server, queryMethod, "/db/deep", string(body), "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+secondID+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+secondID+`"],"cursor":""}`)
 }
 
 func TestPathQueryLimitsHTTP(t *testing.T) {

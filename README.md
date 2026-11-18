@@ -36,7 +36,7 @@ xh GET localhost:8080/healthz
 
 # Create a database with email and age indexes.
 xh POST localhost:8080/db name=example \
-  indexes:='[{"name":"email","path":"/email"},{"name":"age","path":"/age"}]'
+  indices:='[{"name":"email","path":"/email"},{"name":"age","path":"/age"}]'
 
 # List databases, optionally after a cursor.
 xh GET localhost:8080/db limit==100 cursor==example
@@ -45,8 +45,12 @@ xh GET localhost:8080/db limit==100 cursor==example
 xh POST localhost:8080/db/example name=KantanDB \
   email=alice@example.com age:=34 active:=true
 
-# List document IDs, optionally after a cursor.
-xh GET localhost:8080/db/example limit==100 cursor==01950000-0000-7000-8000-000000000001
+# Read the database name, index definitions, and document count.
+xh GET localhost:8080/db/example
+
+# List documents without a filter.
+echo '{"limit":100}' | \
+  xh QUERY localhost:8080/db/example Content-Type:application/json
 
 # Query the email index. op defaults to eq.
 echo '{"index":"email","value":"alice@example.com","limit":100}' | \
@@ -98,6 +102,21 @@ xh POST localhost:8080/bulk/target \
 xh DELETE localhost:8080/db/example
 ```
 
+### Query results
+
+`QUERY /db/{database}` accepts `{}` to list all documents. Add `limit` and
+`cursor` for pagination, or an index or JSONPath filter. Results have this shape:
+
+```json
+{"documents":[{"id":"0195…","rev":"0123456789abcdef0123456789abcdef","doc":{"name":"Alice"}}],"cursor":""}
+```
+
+Each page reads matches, bodies, and revisions from one storage snapshot.
+`rev` is the ETag value without quotes; quote it for `If-Match`.
+Pages have an 8 MiB serialized-record budget, but always permit one record.
+A cursor continues pages cut short by document count, byte budget, or scan work.
+`GET /db/{database}` returns `name`, `indices`, and `doc_count`, not documents.
+
 ### Index queries
 
 Index queries support `eq`, `lt`, `le`, `gt`, and `ge`; the default is `eq`.
@@ -114,7 +133,7 @@ same database, index, operator, and value.
 ### JSONPath queries
 
 Send either `{"index":"age","op":"ge","value":30}` or a JSONPath query in the
-body of `QUERY /db/{database}`. Supply exactly one of `index` or `path`.
+body of `QUERY /db/{database}`. For a filter, supply exactly one of `index` or `path`.
 A named index uses its JSON Pointer semantics, including array positions; an unknown
 index returns `404 index_not_found`. Without `index`, automatic selection and scan
 fallback remain unchanged.

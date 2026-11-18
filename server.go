@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
-	"net/url"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -29,7 +28,7 @@ type api struct {
 
 type dbRequest struct {
 	Name    string          `json:"name"`
-	Indexes *[]indexRequest `json:"indexes,omitempty"`
+	Indices *[]indexRequest `json:"indices,omitempty"`
 }
 
 type indexRequest struct {
@@ -38,12 +37,12 @@ type indexRequest struct {
 }
 
 func (r dbRequest) indexDefs() []indexDef {
-	if r.Indexes == nil {
+	if r.Indices == nil {
 		return nil
 	}
 
-	defs := make([]indexDef, len(*r.Indexes))
-	for i, index := range *r.Indexes {
+	defs := make([]indexDef, len(*r.Indices))
+	for i, index := range *r.Indices {
 		defs[i] = indexDef{name: index.Name, path: index.Path}
 	}
 
@@ -60,8 +59,8 @@ type dbList struct {
 }
 
 type docList struct {
-	Documents []string `json:"documents"`
-	Cursor    string   `json:"cursor"`
+	Documents []queryDoc `json:"documents"`
+	Cursor    string     `json:"cursor"`
 }
 
 type cmpOp byte
@@ -155,7 +154,7 @@ func (a *api) handler() http.Handler {
 	route(mux, http.MethodGet, "/healthz", a.health)
 	route(mux, http.MethodPost, "/db", a.createDB)
 	route(mux, http.MethodGet, "/db", a.listDBs)
-	route(mux, http.MethodGet, "/db/{database}", a.listDocs)
+	route(mux, http.MethodGet, "/db/{database}", a.getDB)
 	route(mux, queryMethod, "/db/{database}", a.queryDocs)
 	route(mux, http.MethodOptions, "/db/{database}", a.queryOptions)
 	route(mux, http.MethodDelete, "/db/{database}", a.deleteDB)
@@ -315,7 +314,7 @@ func (a *api) createDB(w http.ResponseWriter, r *http.Request) {
 
 	request, err := decodeDBRequest(body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "Request body must contain a database name and optional indexes")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Request body must contain a database name and optional indices")
 
 		return
 	}
@@ -365,7 +364,7 @@ func (a *api) listDBs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dbList{Databases: names})
 }
 
-func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
+func (a *api) getDB(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Query", "application/json")
 
 	database := r.PathValue("database")
@@ -374,33 +373,25 @@ func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "URI query parameters are not supported")
 
-	query, ok := parseDocQuery(w, r)
-	if !ok {
 		return
 	}
 
-	ids, more, err := a.store.listDocs(database, query.limit, query.cursor)
+	info, err := a.store.databaseInfo(r.Context(), database)
 	if errors.Is(err, errDBNotFound) {
 		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 
 		return
 	}
 	if err != nil {
-		a.fail(w, r, "list documents", err)
+		a.fail(w, r, "get database", err)
 
 		return
 	}
-	if ids == nil {
-		ids = []string{}
-	}
 
-	cursor := ""
-	if more {
-		cursor = ids[len(ids)-1]
-	}
-
-	writeJSON(w, http.StatusOK, docList{Documents: ids, Cursor: cursor})
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (a *api) queryOptions(w http.ResponseWriter, r *http.Request) {
@@ -459,13 +450,18 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var ids []string
+	var docs []queryDoc
 	var cursor string
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
 		defer cancel()
 
-		ids, cursor, err = a.store.executePathQuery(ctx, database, plan, query)
+		docs, cursor, err = a.store.executePathQuery(ctx, database, plan, query)
+	}
+	if errors.Is(err, errIndexNotFound) {
+		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
+
+		return
 	}
 	if errors.Is(err, errInvalidQueryCursor) {
 		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
@@ -497,53 +493,11 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	if ids == nil {
-		ids = []string{}
+	if docs == nil {
+		docs = []queryDoc{}
 	}
 
-	writeJSON(w, http.StatusOK, docList{Documents: ids, Cursor: cursor})
-}
-
-type listQuery struct {
-	limit  int
-	cursor string
-}
-
-func parseDocQuery(w http.ResponseWriter, r *http.Request) (listQuery, bool) {
-	values, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
-
-		return listQuery{}, false
-	}
-	for name, entries := range values {
-		if name != "limit" && name != "cursor" || len(entries) != 1 {
-			writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
-
-			return listQuery{}, false
-		}
-	}
-
-	query := listQuery{limit: defaultListLimit}
-	if entries, ok := values["limit"]; ok {
-		limit, err := strconv.Atoi(entries[0])
-		if err != nil || limit < 1 || limit > maxListLimit {
-			writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
-
-			return listQuery{}, false
-		}
-		query.limit = limit
-	}
-	if entries, ok := values["cursor"]; ok {
-		query.cursor = entries[0]
-	}
-	if query.cursor != "" && validateID(query.cursor) != nil {
-		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
-
-		return listQuery{}, false
-	}
-
-	return query, true
+	writeJSON(w, http.StatusOK, docList{Documents: docs, Cursor: cursor})
 }
 
 func parseCmpOp(raw string) (cmpOp, bool) {
@@ -1033,13 +987,13 @@ func decodeDBRequest(body []byte) (dbRequest, error) {
 	}
 
 	var fields struct {
-		Indexes json.RawMessage `json:"indexes"`
+		Indices json.RawMessage `json:"indices"`
 	}
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return dbRequest{}, err
 	}
-	if bytes.Equal(bytes.TrimSpace(fields.Indexes), []byte("null")) {
-		return dbRequest{}, errors.New("indexes must be an array")
+	if bytes.Equal(bytes.TrimSpace(fields.Indices), []byte("null")) {
+		return dbRequest{}, errors.New("indices must be an array")
 	}
 
 	return request, nil

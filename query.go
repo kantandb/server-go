@@ -11,7 +11,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/cockroachdb/pebble"
 	"github.com/theory/jsonpath"
 	"github.com/theory/jsonpath/spec"
 )
@@ -44,12 +43,6 @@ type pathPlan struct {
 	path  *jsonpath.Path
 	text  string
 	index string
-}
-
-type pathPage struct {
-	ids    []string
-	lastID string
-	more   bool
 }
 
 func decodePathQuery(body []byte) (pathQuery, error) {
@@ -107,8 +100,12 @@ func decodePathQuery(body []byte) (pathQuery, error) {
 	if err := jsonEnd(decoder); err != nil {
 		return pathQuery{}, err
 	}
-	if seen["path"] == seen["index"] || !seen["value"] {
+	filtered := seen["path"] || seen["index"]
+	if filtered && (seen["path"] == seen["index"] || !seen["value"]) {
 		return pathQuery{}, errors.New("exactly one of path or index, and value are required")
+	}
+	if !filtered && (seen["op"] || seen["value"]) {
+		return pathQuery{}, errors.New("operator and value require a path or index")
 	}
 	if seen["path"] && query.path == "" || seen["index"] && validateName(query.index) != nil {
 		return pathQuery{}, errors.New("invalid path or index")
@@ -147,7 +144,7 @@ func jsonEnd(decoder *json.Decoder) error {
 
 // planQuery keeps named-index semantics separate from JSONPath evaluation.
 func (s *store) planQuery(database string, query pathQuery) (pathPlan, error) {
-	if query.index == "" {
+	if query.index == "" && query.path != "" {
 		return s.planPathQuery(database, query.path)
 	}
 
@@ -161,6 +158,9 @@ func (s *store) planQuery(database string, query pathQuery) (pathPlan, error) {
 	}
 	if !exists {
 		return pathPlan{}, errDBNotFound
+	}
+	if query.index == "" {
+		return pathPlan{}, nil
 	}
 	defs, err := s.indexes(database)
 	if err != nil {
@@ -320,162 +320,6 @@ func jsonPathPointer(path *jsonpath.Path) (string, bool) {
 	result := pointer.String()
 
 	return result, result != ""
-}
-
-func (s *store) queryPathDocs(ctx context.Context, database string, path *jsonpath.Path, op cmpOp, value any, limit, maxWork int, afterID string) (page pathPage, queryErr error) {
-	dbMu := s.dbLock(database)
-	dbMu.RLock()
-	defer dbMu.RUnlock()
-
-	databaseKey, err := s.databaseKey(database)
-	if err != nil {
-		return pathPage{}, err
-	}
-	defer clear(databaseKey)
-
-	encoded, err := encodeIndexValue(value)
-	if err != nil {
-		return pathPage{}, err
-	}
-
-	prefix := docsPrefix(database)
-	snapshot := s.db.NewSnapshot()
-	defer func() {
-		if err := snapshot.Close(); err != nil {
-			queryErr = errors.Join(queryErr, wrapStore("closing path query snapshot", err))
-		}
-	}()
-
-	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
-	if err != nil {
-		return pathPage{}, wrapStore("creating path query iterator", err)
-	}
-	defer func() {
-		if err := iter.Close(); err != nil {
-			queryErr = errors.Join(queryErr, wrapStore("closing path query iterator", err))
-		}
-	}()
-
-	valid := iter.First()
-	if afterID != "" {
-		key := docKey(database, afterID)
-		valid = iter.SeekGE(key)
-		if valid && bytes.Equal(iter.Key(), key) {
-			valid = iter.Next()
-		}
-	}
-
-	for work := 0; valid; valid, work = iter.Next(), work+1 {
-		if err := ctx.Err(); err != nil {
-			return pathPage{}, err
-		}
-		if work >= maxWork {
-			page.more = true
-
-			break
-		}
-
-		id := string(iter.Key()[len(prefix):])
-		if validateID(id) != nil {
-			return pathPage{}, fmt.Errorf("%w: invalid document key", errCorruptData)
-		}
-		page.lastID = id
-
-		doc, err := openDoc(iter.Key(), databaseKey, id, iter.Value())
-		if err != nil {
-			return pathPage{}, fmt.Errorf("reading query document: %w", err)
-		}
-
-		var root any
-		decoder := json.NewDecoder(bytes.NewReader(doc.json))
-		decoder.UseNumber()
-		if err := decoder.Decode(&root); err != nil {
-			return pathPage{}, fmt.Errorf("%w: invalid document JSON", errCorruptData)
-		}
-		matches, err := pathMatches(ctx, path, root, op, encoded, maxQueryNodes)
-		if err != nil {
-			return pathPage{}, err
-		}
-		if matches {
-			page.ids = append(page.ids, id)
-		}
-		if len(page.ids) > limit {
-			page.ids = page.ids[:limit]
-			page.lastID = page.ids[len(page.ids)-1]
-			page.more = true
-
-			break
-		}
-	}
-	if err := iter.Error(); err != nil {
-		return pathPage{}, wrapStore("iterating path query", err)
-	}
-
-	return page, nil
-}
-
-func (s *store) executePathQuery(ctx context.Context, database string, plan pathPlan, query pathQuery) ([]string, string, error) {
-	key, err := s.cursorKey(database)
-	if err != nil {
-		return nil, "", err
-	}
-	defer clear(key)
-
-	box, err := newQueryCipher(key)
-	if err != nil {
-		return nil, "", err
-	}
-	encoded, err := encodeIndexValue(query.value)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var afterID string
-	var lastValue []byte
-	if query.cursor != "" {
-		cursor, err := decodePathCursor(box, query.cursor)
-		if err != nil || matchPathCursor(cursor, database, plan, query, encoded) != nil {
-			return nil, "", errInvalidQueryCursor
-		}
-		afterID, lastValue = cursor.id, cursor.lastValue
-	}
-
-	var ids []string
-	var more bool
-	if plan.index == "" {
-		page, err := s.queryPathDocs(ctx, database, plan.path, query.op, query.value, query.limit, maxScanDocs, afterID)
-		if err != nil {
-			return nil, "", err
-		}
-		ids, afterID, more = page.ids, page.lastID, page.more
-	} else if query.op == cmpEq {
-		ids, more, err = s.queryDocsCtx(ctx, database, plan.index, encoded, query.limit, afterID)
-	} else {
-		page, pageErr := s.queryRangePage(ctx, database, plan.index, query.op, encoded, query.limit, lastValue, afterID)
-		ids, lastValue, more, err = page.ids, page.lastValue, page.more, pageErr
-	}
-	if err != nil || !more {
-		return ids, "", err
-	}
-	if plan.index != "" {
-		afterID = ids[len(ids)-1]
-	}
-
-	order := orderDocument
-	if plan.index != "" {
-		order = orderIndex
-	}
-	cursor := pathCursor{
-		method: queryMethod, dialect: dialectJSONPath, order: order,
-		database: database, pathHash: pathHash(plan.text), index: plan.index,
-		op: query.op, value: encoded, lastValue: lastValue, id: afterID,
-	}
-	token, err := encodePathCursor(box, cursor)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return ids, token, nil
 }
 
 func pathMatches(ctx context.Context, path *jsonpath.Path, root any, op cmpOp, expected []byte, maxNodes int) (bool, error) {

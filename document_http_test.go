@@ -54,14 +54,14 @@ func TestDocumentLifecycleHTTP(t *testing.T) {
 	checkResponse(t, res, http.StatusNotFound, `{"error":{"code":"document_not_found","message":"Document does not exist"}}`)
 }
 
-func TestListDocumentsHTTP(t *testing.T) {
+func TestQueryAllDocumentsHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
 	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"dbname"}`, "application/json")
 	checkResponse(t, res, http.StatusCreated, `{"name":"dbname"}`)
 
-	res = sendRequest(t, server, http.MethodGet, "/db/dbname", "", "")
+	res = sendRequest(t, server, queryMethod, "/db/dbname", `{}`, "application/json")
 	checkResponse(t, res, http.StatusOK, `{"documents":[],"cursor":""}`)
 
 	var ids []string
@@ -82,8 +82,8 @@ func TestListDocumentsHTTP(t *testing.T) {
 	}
 	slices.Sort(ids)
 
-	res = sendRequest(t, server, http.MethodGet, "/db/dbname?limit=2", "", "")
-	var page docList
+	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"limit":2}`, "application/json")
+	var page idPage
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -93,12 +93,13 @@ func TestListDocumentsHTTP(t *testing.T) {
 	if !slices.Equal(page.Documents, ids[:2]) {
 		t.Errorf("documents = %v, want %v", page.Documents, ids[:2])
 	}
-	if page.Cursor != ids[1] {
-		t.Errorf("cursor = %q, want %q", page.Cursor, ids[1])
+	if page.Cursor == "" || page.Cursor == ids[1] {
+		t.Fatalf("cursor = %q, want opaque cursor", page.Cursor)
 	}
+	cursor := page.Cursor
 
-	res = sendRequest(t, server, http.MethodGet, "/db/dbname?limit=1&cursor="+ids[1], "", "")
-	page = docList{}
+	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"limit":1,"cursor":"`+cursor+`"}`, "application/json")
+	page = idPage{}
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
@@ -112,11 +113,13 @@ func TestListDocumentsHTTP(t *testing.T) {
 		t.Errorf("final cursor = %q, want empty", page.Cursor)
 	}
 
-	res = sendRequest(t, server, http.MethodGet, "/db/dbname?cursor="+ids[2], "", "")
+	res = sendRequest(t, server, http.MethodDelete, "/db/dbname/"+ids[2], "", "")
+	checkResponse(t, res, http.StatusNoContent, "")
+	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"cursor":"`+cursor+`"}`, "application/json")
 	checkResponse(t, res, http.StatusOK, `{"documents":[],"cursor":""}`)
 }
 
-func TestListDocumentsValidationHTTP(t *testing.T) {
+func TestDatabaseInfoValidationHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
@@ -127,11 +130,11 @@ func TestListDocumentsValidationHTTP(t *testing.T) {
 		path string
 		code string
 	}{
-		{path: "/db/dbname?limit=", code: "invalid_limit"},
-		{path: "/db/dbname?limit=0", code: "invalid_limit"},
-		{path: "/db/dbname?limit=1001", code: "invalid_limit"},
-		{path: "/db/dbname?limit=none", code: "invalid_limit"},
-		{path: "/db/dbname?cursor=bad", code: "invalid_cursor"},
+		{path: "/db/dbname?limit=", code: "invalid_query"},
+		{path: "/db/dbname?limit=0", code: "invalid_query"},
+		{path: "/db/dbname?limit=1001", code: "invalid_query"},
+		{path: "/db/dbname?limit=none", code: "invalid_query"},
+		{path: "/db/dbname?cursor=bad", code: "invalid_query"},
 		{path: "/db/dbname?unknown=true", code: "invalid_query"},
 		{path: "/db/dbname?limit=1&limit=2", code: "invalid_query"},
 		{path: "/db/dbname?cursor=&cursor=", code: "invalid_query"},
@@ -158,8 +161,8 @@ func TestOversizedIndexedValueHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"dbname","indexes":[{"name":"value","path":"/value"}]}`, "application/json")
-	checkResponse(t, res, http.StatusCreated, `{"name":"dbname","indexes":[{"name":"value","path":"/value"}]}`)
+	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"dbname","indices":[{"name":"value","path":"/value"}]}`, "application/json")
+	checkResponse(t, res, http.StatusCreated, `{"name":"dbname","indices":[{"name":"value","path":"/value"}]}`)
 
 	large := `{"value":"` + strings.Repeat("x", maxIndexValue) + `"}`
 	res = sendRequest(t, server, http.MethodPost, "/db/dbname", large, "application/json")

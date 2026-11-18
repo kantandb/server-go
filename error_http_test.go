@@ -192,8 +192,8 @@ func TestCorruptionIsMappedAndLogged(t *testing.T) {
 
 	res := sendRequest(t, server, http.MethodGet, "/db/dbname", "", "")
 	checkResponse(t, res, http.StatusInternalServerError, `{"error":{"code":"corrupt_data","message":"Stored data is corrupt"}}`)
-	if !strings.Contains(logs.String(), `"operation":"list documents"`) {
-		t.Errorf("list log = %s", logs.String())
+	if !strings.Contains(logs.String(), `"operation":"get database"`) {
+		t.Errorf("database log = %s", logs.String())
 	}
 
 	res = sendRequest(t, server, http.MethodGet, "/db/dbname/"+id, "", "")

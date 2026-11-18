@@ -10,7 +10,7 @@ func TestNamedQueryHTTP(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"stock","indexes":[{"name":"sku","path":"/items/0/sku"},{"name":"other","path":"/items/0/sku"}]}`, "application/json")
+	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"stock","indices":[{"name":"sku","path":"/items/0/sku"},{"name":"other","path":"/items/0/sku"}]}`, "application/json")
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("create database status = %d", res.StatusCode)
 	}
@@ -22,7 +22,7 @@ func TestNamedQueryHTTP(t *testing.T) {
 	objectID := createQueryDoc(t, server, "/db/stock", `{"items":{"0":{"sku":"z"}}}`)
 	arrayID := createQueryDoc(t, server, "/db/stock", `{"items":[{"sku":"a"}]}`)
 	res = sendRequest(t, server, queryMethod, "/db/stock", `{"index":"sku","op":"ge","value":"a","limit":1}`, "application/json")
-	var page docList
+	var page idPage
 	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestNamedQueryHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	res = sendRequest(t, server, queryMethod, "/db/stock", string(body), "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
 
 	for _, body := range []string{
 		`{"index":"sku","value":"a","cursor":"` + page.Cursor + `"}`,
@@ -50,7 +50,7 @@ func TestNamedQueryHTTP(t *testing.T) {
 	}
 
 	res = sendRequest(t, server, queryMethod, "/db/stock", `{"index":"sku","value":"z"}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
+	checkQueryIDs(t, res, http.StatusOK, `{"documents":["`+objectID+`"],"cursor":""}`)
 	res = sendRequest(t, server, queryMethod, "/db/stock", `{"index":"missing","value":"a"}`, "application/json")
 	checkResponse(t, res, http.StatusNotFound, `{"error":{"code":"index_not_found","message":"Index does not exist"}}`)
 	res = sendRequest(t, server, queryMethod, "/db/missing", `{"index":"sku","value":"a"}`, "application/json")
@@ -61,6 +61,7 @@ func TestDecodeNamedQuery(t *testing.T) {
 	t.Parallel()
 
 	for _, body := range []string{
+		`{}`, `{"limit":1}`, `{"limit":2,"cursor":"opaque"}`,
 		`{"index":"sku","value":null}`,
 		`{"index":"sku","op":"ge","value":10}`,
 		`{"path":"$.sku","value":"a"}`,
@@ -70,7 +71,8 @@ func TestDecodeNamedQuery(t *testing.T) {
 		}
 	}
 	for _, body := range []string{
-		`{"value":1}`, `{"index":"","value":1}`, `{"index":null,"value":1}`,
+		`{"value":1}`, `{"op":"eq"}`, `{"op":"eq","value":null}`, `{"path":null,"value":1}`,
+		`{"index":"","value":1}`, `{"index":null,"value":1}`,
 		`{"index":12,"value":1}`, `{"index":"BAD","value":1}`,
 		`{"index":"sku","path":"$.sku","value":1}`,
 		`{"index":"sku","path":null,"value":1}`, `{"index":"sku"}`,
