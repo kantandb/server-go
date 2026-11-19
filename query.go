@@ -100,21 +100,14 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 	}
 
 	plan := planQuery(query)
-	input := &queryInput{limit: !stream}
-	// No module or environment loader. Only the document scan is exposed.
-	code, err := gojq.Compile(query, gojq.WithInputIter(input))
+	worker, err := startWorker(ctx, program, stream)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errInvalidQuery, err)
+		return err
 	}
+	defer worker.stop()
 
 	return s.scanQuery(ctx, database, plan, func(read func(context.Context) ([]byte, error)) error {
-		input.read = read
-		for {
-			done, err := evalQueryDoc(ctx, input, code, stream, emit)
-			if done || err != nil {
-				return err
-			}
-		}
+		return worker.scan(&queryInput{limit: !stream, read: read}, emit)
 	})
 }
 
