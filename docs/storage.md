@@ -20,9 +20,9 @@ Document JSON is compressed and encrypted before it reaches Pebble. This protect
 
 Encryption does not hide database names, index names, document IDs, indexed values, record sizes, or plaintext left in old stores and backups. Pebble needs plaintext secondary-index values for ordered scans.
 
-The `-key-file` must contain one base64-encoded 32-byte key. KantanDB derives a store wrapping key from it and a random 32-byte store salt. Each database has a random 32-byte key stored only as AES-256-GCM ciphertext. HKDF-SHA256 derives separate cursor and per-document keys from the database key.
+The `-key-file` must contain one base64-encoded 32-byte key. KantanDB derives a store wrapping key from it and a random 32-byte store salt. Each database has a random 32-byte key stored only as AES-256-GCM ciphertext. HKDF-SHA256 derives per-document keys from the database key.
 
-Deleting and recreating a database creates a new database key. Its old documents and cursors cannot be used with the new database.
+Deleting and recreating a database creates a new database key. Its old document records cannot be decrypted with the new key.
 
 ## Logical key layout
 
@@ -83,13 +83,13 @@ Index values have type tags. `null`, booleans, numbers, and strings are supporte
 
 A query scans the matching index-key range, extracts each document ID, and checks that its primary record exists. Equal values are ordered by document ID; range results are ordered by encoded value and then document ID.
 
-## JSONPath queries
+## jq queries
 
-An empty QUERY filter lists documents. A named-index filter uses that index directly. A JSONPath filter uses an existing secondary index when its singular path translates exactly to that index's JSON Pointer. Otherwise, KantanDB scans encrypted document records in ID order under a Pebble snapshot. It decrypts each record, evaluates JSONPath, and compares each selected scalar with the requested value.
+`QUERY` reads one Pebble snapshot in document-ID order. It decrypts and decodes
+each document body as jq needs it. Queries do not scan secondary indexes or
+use cursors.
 
-Each QUERY result contains the ID, unquoted revision, and document body. Matching and body reads use the same snapshot. A scan examines at most 10,000 records per page. Its authenticated cursor records the last examined ID, including when no document matched. Indexed QUERY cursors record the encoded value and document ID. Both cursor forms bind the normalized JSONPath and selected execution order.
-
-## How range queries work
+## Secondary-index range scans
 
 Numbers and strings are encoded so their byte order matches their value order. All values of the same type also share a key prefix:
 
@@ -98,7 +98,7 @@ index prefix → type → encoded value → document ID
                └──────── scan range ─────────┘
 ```
 
-KantanDB turns an operator into Pebble iterator bounds around the requested value:
+The storage layer sets Pebble iterator bounds around the requested value:
 
 | Operator | Scanned keys                            |
 | -------- | --------------------------------------- |
@@ -109,7 +109,7 @@ KantanDB turns an operator into Pebble iterator bounds around the requested valu
 
 The type prefix limits the scan to either numbers or strings. A numeric range cannot include strings, and a string range cannot include numbers. Booleans and `null` support equality only.
 
-Each range query uses a Pebble snapshot, so its page sees a consistent view. The iterator moves forward in encoded-value order and reads one extra valid entry to determine whether another page exists. A continuation cursor records the last encoded value and document ID; together they identify the next scan position.
+Internal range scans use a Pebble snapshot. The iterator moves forward in encoded-value order. The last encoded value and document ID identify the next scan position.
 
 ## Writes and deletion
 

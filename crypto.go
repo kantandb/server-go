@@ -23,7 +23,6 @@ var (
 
 const (
 	wrappingInfo = "kantandb/wrapping/v1"
-	cursorInfo   = "kantandb/cursor/v1"
 	documentInfo = "kantandb/document/v1"
 	storeADInfo  = "kantandb/store-metadata/v1"
 	databaseAD   = "kantandb/database-record/v1"
@@ -156,10 +155,6 @@ func deriveWrapKey(masterKey, salt []byte) ([]byte, error) {
 	}
 
 	return key, nil
-}
-
-func deriveCursorKey(databaseKey []byte) ([]byte, error) {
-	return deriveKey(databaseKey, []byte(cursorInfo))
 }
 
 func deriveDocumentKey(databaseKey []byte, id string) ([]byte, error) {

@@ -3,172 +3,64 @@ package main
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
+	"time"
 
-	"github.com/theory/jsonpath"
+	"github.com/cockroachdb/pebble"
 )
 
-func TestJSONPathPointer(t *testing.T) {
+func TestQueryReadsWholeSnapshot(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		path    string
-		pointer string
-		ok      bool
-	}{
-		{path: `$.profile.age`, pointer: "/profile/age", ok: true},
-		{path: `$['a/b']['~x']`, pointer: "/a~1b/~0x", ok: true},
-		{path: `$`, ok: false},
-		{path: `$.items[0]`, ok: false},
-		{path: `$.items['0']`, ok: false},
-		{path: `$.items[-1]`, ok: false},
-		{path: `$.items[*]`, ok: false},
-		{path: `$..name`, ok: false},
-		{path: `$['a','b']`, ok: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			path, err := jsonpath.Parse(tt.path)
-			if err != nil {
-				t.Fatalf("Parse() error = %v", err)
-			}
-
-			pointer, ok := jsonPathPointer(path)
-			if pointer != tt.pointer || ok != tt.ok {
-				t.Errorf("jsonPathPointer() = (%q, %t), want (%q, %t)", pointer, ok, tt.pointer, tt.ok)
-			}
-		})
-	}
-}
-
-func TestValidatePathText(t *testing.T) {
-	t.Parallel()
-
-	if err := validatePathText(`$.items[?(@.age >= 18)]`); err != nil {
-		t.Errorf("validatePathText() error = %v", err)
-	}
-	if err := validatePathText("$" + strings.Repeat("(", maxPathDepth+1)); !errors.Is(err, errInvalidPath) {
-		t.Errorf("deep path error = %v, want invalid path", err)
-	}
-	if err := validatePathText("$" + strings.Repeat(".a", maxQueryPath)); !errors.Is(err, errInvalidPath) {
-		t.Errorf("long path error = %v, want invalid path", err)
-	}
-}
-
-func TestSafePath(t *testing.T) {
-	t.Parallel()
-
-	for _, path := range []string{`$..items[*].name`, `$.items[?(@.name == "a,b")]`, `$.items[?match(@.name, "a,b")]`} {
-		if !safePath(path) {
-			t.Errorf("safePath(%q) = false", path)
-		}
-	}
-	for _, path := range []string{`$..*..*`, `$["a","a"]`, `$[?(@["a","a"])]`} {
-		if safePath(path) {
-			t.Errorf("safePath(%q) = true", path)
-		}
-	}
-}
-
-func TestPlanPathQuery(t *testing.T) {
-	t.Parallel()
-
-	store := testStore(t)
-	if err := store.createDB("scores", indexDef{name: "first", path: "/score"}, indexDef{name: "second", path: "/score"}); err != nil {
-		t.Fatalf("createDB() error = %v", err)
-	}
-
-	plan, err := store.planPathQuery("scores", `$.score`)
-	if err != nil {
-		t.Fatalf("planPathQuery() error = %v", err)
-	}
-	if plan.text != `$["score"]` || plan.index != "first" {
-		t.Errorf("plan = %+v, want canonical path and first matching index", plan)
-	}
-
-	plan, err = store.planPathQuery("scores", `$..score`)
-	if err != nil {
-		t.Fatalf("planPathQuery() error = %v", err)
-	}
-	if plan.index != "" {
-		t.Errorf("descendant index = %q, want scan", plan.index)
-	}
-
-	store = testStore(t)
-	if err := store.createDB("items", indexDef{name: "sku", path: "/items/0/sku"}); err != nil {
-		t.Fatalf("createDB() error = %v", err)
-	}
-	for _, path := range []string{`$.items[0].sku`, `$.items['0'].sku`} {
-		plan, err := store.planPathQuery("items", path)
-		if err != nil {
-			t.Fatalf("planPathQuery(%q) error = %v", path, err)
-		}
-		if plan.index != "" {
-			t.Errorf("planPathQuery(%q) index = %q, want scan", path, plan.index)
-		}
-	}
-}
-
-func TestPathMatchLimits(t *testing.T) {
-	t.Parallel()
-
-	path := jsonpath.MustParse(`$[*]`)
-	expected, err := encodeIndexValue(1)
-	if err != nil {
-		t.Fatalf("encodeIndexValue() error = %v", err)
-	}
-	if _, err := pathMatches(context.Background(), path, []any{1, 2}, cmpEq, expected, 2); !errors.Is(err, errQueryLimit) {
-		t.Errorf("pathMatches() error = %v, want query limit", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := pathMatches(ctx, path, []any{1}, cmpEq, expected, 10); !errors.Is(err, context.Canceled) {
-		t.Errorf("pathMatches() error = %v, want context canceled", err)
-	}
-}
-
-func TestPathQueryScanLimits(t *testing.T) {
-	t.Parallel()
-
-	store := testStore(t)
-	if err := store.createDB("users"); err != nil {
-		t.Fatalf("createDB() error = %v", err)
-	}
-	for _, id := range []string{indexTestIDA, indexTestIDB} {
-		if _, err := store.createDocWithID("users", id, []byte(`{"age":10}`)); err != nil {
-			t.Fatalf("createDoc() error = %v", err)
-		}
-	}
-	path := jsonpath.MustParse(`$.missing`)
-	key, err := store.databaseKey("users")
-	if err != nil {
+	s := queryStore(t)
+	key := docKey("users", indexTestIDB)
+	if err := s.db.Set(key, []byte("bad record"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
-	defer clear(key)
-	snapshot := store.db.NewSnapshot()
-	defer func() {
-		if err := snapshot.Close(); err != nil {
-			t.Error(err)
+	body, err := s.queryArray(t.Context(), "users", []byte("42"))
+	if body != nil || !errors.Is(err, errCorruptData) {
+		t.Fatalf("runQuery() = %s, %v; want corruption and no partial output", body, err)
+	}
+}
+
+func TestQueryInputLimits(t *testing.T) {
+	t.Parallel()
+
+	for _, limit := range []bool{true, false} {
+		input := &queryInput{
+			ctx: t.Context(), docs: maxScanDocs, bytes: maxScanBytes, limit: limit,
+			read: func(context.Context) ([]byte, error) { return []byte(`{"age":25}`), nil },
 		}
-	}()
+		value, ok := input.Next()
+		if !ok || limit && !errors.Is(input.err, errQueryLimit) || !limit && input.err != nil {
+			t.Errorf("Next() with limit %t = %v, %t, err %v", limit, value, ok, input.err)
+		}
+	}
+}
 
-	plan := pathPlan{path: path}
-	query := pathQuery{op: cmpEq, value: true, limit: 10}
-	encoded := valueForCursor(t, true)
-	page, err := queryResultPage(context.Background(), snapshot, key, "users", plan, query, encoded, pathCursor{}, maxQueryBytes, 1)
-	if err != nil {
-		t.Fatalf("queryResultPage() error = %v", err)
+func TestQueryDeadline(t *testing.T) {
+	t.Parallel()
+
+	s := queryStore(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+	defer cancel()
+
+	body, err := s.queryArray(ctx, "users", []byte(`def loop: loop; loop`))
+	if body != nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runQuery() = %s, %v; want deadline exceeded", body, err)
 	}
-	if len(page.docs) != 0 || !page.more || page.lastID != indexTestIDA {
-		t.Errorf("page = %+v, want bounded scan cursor at first ID", page)
+}
+
+func queryStore(t *testing.T) *store {
+	t.Helper()
+
+	s := testStore(t)
+	if err := s.createDB("users"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.createDocWithID("users", indexTestIDA, []byte(`{"age":25}`)); err != nil {
+		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = queryResultPage(ctx, snapshot, key, "users", plan, query, encoded, pathCursor{}, maxQueryBytes, 1)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("canceled query error = %v, want context canceled", err)
-	}
+	return s
 }

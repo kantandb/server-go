@@ -22,6 +22,7 @@ type api struct {
 	maxBodyBytes int64
 	bulk         bulkConfig
 	bulkSlots    chan struct{}
+	querySlots   chan struct{}
 	log          *slog.Logger
 	stopping     atomic.Bool
 }
@@ -56,25 +57,6 @@ type serviceInfo struct {
 
 type dbList struct {
 	Databases []string `json:"databases"`
-}
-
-type docList struct {
-	Documents []queryDoc `json:"documents"`
-	Cursor    string     `json:"cursor"`
-}
-
-type cmpOp byte
-
-const (
-	cmpEq cmpOp = iota
-	cmpLT
-	cmpLE
-	cmpGT
-	cmpGE
-)
-
-func (op cmpOp) valid() bool {
-	return op <= cmpGE
 }
 
 type docResponse struct {
@@ -125,6 +107,7 @@ func newAPIWithBulk(store *store, maxBodyBytes int64, bulk bulkConfig, log *slog
 		maxBodyBytes: maxBodyBytes,
 		bulk:         bulk,
 		bulkSlots:    make(chan struct{}, bulk.concurrency),
+		querySlots:   make(chan struct{}, queryConcurrency),
 		log:          log,
 	}
 }
@@ -163,10 +146,8 @@ func (a *api) handler() http.Handler {
 	route(mux, http.MethodPut, "/db/{database}/{id}", a.replaceDoc)
 	route(mux, http.MethodPatch, "/db/{database}/{id}", a.patchDoc)
 	route(mux, http.MethodDelete, "/db/{database}/{id}", a.deleteDoc)
-	route(mux, http.MethodGet, "/bulk/{database}", a.exportBulk)
-	route(mux, http.MethodPost, "/bulk/{database}", a.importBulk)
 
-	for _, pattern := range []string{"/{$}", "/healthz", "/db", "/db/{database}", "/db/{database}/{id}", "/bulk/{database}"} {
+	for _, pattern := range []string{"/{$}", "/healthz", "/db", "/db/{database}", "/db/{database}/{id}"} {
 		mux.HandleFunc(pattern, methodNotAllowed)
 	}
 	mux.HandleFunc("/", notFound)
@@ -365,7 +346,7 @@ func (a *api) listDBs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) getDB(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Accept-Query", "application/json")
+	w.Header().Set("Accept-Query", queryMediaType)
 
 	database := r.PathValue("database")
 	if err := validateName(database); err != nil {
@@ -395,14 +376,15 @@ func (a *api) getDB(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) queryOptions(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Accept-Query", "application/json")
+	w.Header().Set("Accept-Query", queryMediaType)
 	w.Header().Set("Allow", "GET, POST, QUERY, DELETE, OPTIONS")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Accept-Query", "application/json")
+	w.Header().Set("Accept-Query", queryMediaType)
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Accept")
 
 	database := r.PathValue("database")
 	if err := validateName(database); err != nil {
@@ -415,8 +397,18 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if charset := params["charset"]; err != nil || mediaType != queryMediaType || charset != "" && !strings.EqualFold(charset, "utf-8") {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be text/plain with UTF-8 encoding")
+
+		return
+	}
+
+	select {
+	case a.querySlots <- struct{}{}:
+		defer func() { <-a.querySlots }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "query_busy", "Too many queries")
 
 		return
 	}
@@ -432,88 +424,47 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	query, err := decodePathQuery(body)
+	responseType := queryResponseType(r.Header.Values("Accept"))
+	if responseType == "" {
+		writeError(w, http.StatusNotAcceptable, "not_acceptable", "Accept must allow application/json or application/x-ndjson")
+
+		return
+	}
+
+	if responseType == queryNDJSON {
+		a.streamQuery(w, r, database, body)
+
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
+	defer cancel()
+
+	result, err := a.store.queryArray(ctx, database, body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Query body is invalid")
+		a.failQuery(w, r, err)
 
 		return
 	}
-	plan, err := a.store.planQuery(database, query)
-	if errors.Is(err, errIndexNotFound) {
-		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
-
-		return
-	}
-	if errors.Is(err, errInvalidPath) {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Path is invalid")
-
-		return
-	}
-
-	var docs []queryDoc
-	var cursor string
-	if err == nil {
-		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
-		defer cancel()
-
-		docs, cursor, err = a.store.executePathQuery(ctx, database, plan, query)
-	}
-	if errors.Is(err, errIndexNotFound) {
-		writeError(w, http.StatusNotFound, "index_not_found", "Index does not exist")
-
-		return
-	}
-	if errors.Is(err, errInvalidQueryCursor) {
-		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
-
-		return
-	}
-	if errors.Is(err, errDBNotFound) {
-		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
-
-		return
-	}
-	if errors.Is(err, errInvalidIndexValue) {
-		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
-
-		return
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		writeError(w, http.StatusServiceUnavailable, "query_timeout", "Query exceeded the execution limit")
-
-		return
-	}
-	if errors.Is(err, errQueryLimit) {
-		writeError(w, http.StatusServiceUnavailable, "query_limit", "Query exceeded the evaluation limit")
-
-		return
-	}
-	if err != nil {
-		a.fail(w, r, "query documents", err)
-
-		return
-	}
-	if docs == nil {
-		docs = []queryDoc{}
-	}
-
-	writeJSON(w, http.StatusOK, docList{Documents: docs, Cursor: cursor})
+	writeData(w, http.StatusOK, queryJSON+"; charset=utf-8", result)
 }
 
-func parseCmpOp(raw string) (cmpOp, bool) {
-	switch raw {
-	case "eq":
-		return cmpEq, true
-	case "lt":
-		return cmpLT, true
-	case "le":
-		return cmpLE, true
-	case "gt":
-		return cmpGT, true
-	case "ge":
-		return cmpGE, true
+func (a *api) failQuery(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, errInvalidQuery):
+		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
+	case errors.Is(err, errQueryRuntime):
+		writeError(w, http.StatusBadRequest, "query_runtime", "Query execution failed")
+	case errors.Is(err, errDBNotFound):
+		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusServiceUnavailable, "query_timeout", "Query exceeded the execution limit")
+	case errors.Is(err, errQueryLimit):
+		writeError(w, http.StatusServiceUnavailable, "query_limit", "Query exceeded the evaluation limit")
+	case errors.Is(err, context.Canceled):
+		return
 	default:
-		return cmpEq, false
+		a.fail(w, r, "query documents", err)
 	}
 }
 
@@ -562,44 +513,7 @@ func (a *api) deleteDB(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *api) exportBulk(w http.ResponseWriter, r *http.Request) {
-	ctx, done, ok := a.startBulk(w, r)
-	if !ok {
-		return
-	}
-	defer done()
-
-	w.Header().Set("Content-Type", bulkMediaType)
-	w.Header().Set("Cache-Control", "no-store")
-	stream := newBulkStream(w)
-
-	err := a.store.exportDocs(ctx, r.PathValue("database"), stream.write)
-	if err != nil {
-		if stream.started {
-			a.log.Error("bulk export failed", "method", r.Method, "path", r.URL.Path, "error", err)
-		} else {
-			a.failBulk(w, r, "export documents", err)
-		}
-
-		return
-	}
-	if !stream.started {
-		w.WriteHeader(http.StatusOK)
-
-		return
-	}
-	if err := stream.flush(); err != nil {
-		a.log.Error("bulk export failed", "method", r.Method, "path", r.URL.Path, "error", err)
-	}
-}
-
 func (a *api) importBulk(w http.ResponseWriter, r *http.Request) {
-	if !isNDJSON(r.Header.Get("Content-Type")) {
-		writeBulkError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/x-ndjson", 0)
-
-		return
-	}
-
 	ctx, done, ok := a.startBulk(w, r)
 	if !ok {
 		return
@@ -644,27 +558,17 @@ func (a *api) startBulk(w http.ResponseWriter, r *http.Request) (context.Context
 	deadline, _ := ctx.Deadline()
 	controller := http.NewResponseController(w)
 
-	var deadlineErr error
-	if r.Method == http.MethodPost {
-		deadlineErr = controller.SetReadDeadline(deadline)
-	} else {
-		deadlineErr = controller.SetWriteDeadline(deadline)
-	}
-	if deadlineErr != nil && !errors.Is(deadlineErr, http.ErrNotSupported) {
+	if err := controller.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		cancel()
 		a.freeBulkSlot()
-		a.failBulk(w, r, "set network deadline", deadlineErr)
+		a.failBulk(w, r, "set network deadline", err)
 
 		return nil, nil, false
 	}
 
 	done := func() {
-		if r.Method == http.MethodPost {
-			if ctx.Err() == nil {
-				_ = controller.SetReadDeadline(time.Time{})
-			}
-		} else {
-			_ = controller.SetWriteDeadline(time.Time{})
+		if ctx.Err() == nil {
+			_ = controller.SetReadDeadline(time.Time{})
 		}
 		cancel()
 		a.freeBulkSlot()
@@ -706,8 +610,14 @@ func (a *api) failBulk(w http.ResponseWriter, r *http.Request, operation string,
 }
 
 func (a *api) createDoc(w http.ResponseWriter, r *http.Request) {
-	if !isJSON(r.Header.Get("Content-Type")) {
-		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json")
+	contentType := r.Header.Get("Content-Type")
+	if isNDJSON(contentType) {
+		a.importBulk(w, r)
+
+		return
+	}
+	if !isJSON(contentType) {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json or application/x-ndjson")
 
 		return
 	}

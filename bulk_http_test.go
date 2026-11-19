@@ -32,7 +32,7 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 		}
 	}
 
-	exported := sendRequest(t, sourceServer, http.MethodGet, "/bulk/source", "", "")
+	exported := sendNDJSONQuery(t, sourceServer, "/db/source", ".")
 	if exported.StatusCode != http.StatusOK {
 		t.Fatalf("export status = %d", exported.StatusCode)
 	}
@@ -43,6 +43,9 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", got)
 	}
 	body := readResponse(t, exported)
+	if got := exported.Trailer.Get(queryStatus); got != "ok" {
+		t.Errorf("Query-Status = %q, want ok", got)
+	}
 	want := "{\"id\":\"ordinary\",\"name\":\"first\"}\n{\"name\":\"second\"}\n"
 	if body != want {
 		t.Fatalf("export body = %q, want %q", body, want)
@@ -52,7 +55,7 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 	if err := target.createDB("target", indexDef{name: "name", path: "/name"}); err != nil {
 		t.Fatalf("createDB() error = %v", err)
 	}
-	imported := sendRequest(t, targetServer, http.MethodPost, "/bulk/target", body, bulkMediaType+"; charset=utf-8")
+	imported := sendRequest(t, targetServer, http.MethodPost, "/db/target", body, bulkMediaType+"; charset=utf-8")
 	checkResponse(t, imported, http.StatusOK, `{"success":true,"error":{}}`)
 
 	ids, _, err := target.listDocs("target", 10, "")
@@ -65,17 +68,13 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 	assertQuery(t, target, "target", "name", "first", idsForValue(t, target, ids, `{"id":"ordinary","name":"first"}`))
 }
 
-func TestBulkExportEmptyHTTP(t *testing.T) {
+func TestBulkRouteRemoved(t *testing.T) {
 	t.Parallel()
 
-	store, server := newBulkTestServer(t, defaultMaxBodyBytes, defaultBulkConfig())
-	if err := store.createDB("db"); err != nil {
-		t.Fatalf("createDB() error = %v", err)
-	}
-
-	res := sendRequest(t, server, http.MethodGet, "/bulk/db", "", "")
-	if res.StatusCode != http.StatusOK || readResponse(t, res) != "" {
-		t.Errorf("empty export status = %d", res.StatusCode)
+	_, server := newBulkTestServer(t, defaultMaxBodyBytes, defaultBulkConfig())
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		res := sendRequest(t, server, method, "/bulk/db", "{}", bulkMediaType)
+		checkResponse(t, res, http.StatusNotFound, `{"error":{"code":"route_not_found","message":"Route does not exist"}}`)
 	}
 }
 
@@ -96,13 +95,11 @@ func TestBulkRequestValidationHTTP(t *testing.T) {
 		status      int
 		code        string
 	}{
-		{name: "query export", method: http.MethodGet, path: "/bulk/db?x=1", status: 400, code: "invalid_query"},
-		{name: "query import", method: http.MethodPost, path: "/bulk/db?x=1", body: `{}`, contentType: bulkMediaType, status: 400, code: "invalid_query"},
-		{name: "invalid name", method: http.MethodGet, path: "/bulk/Bad", status: 400, code: "invalid_name"},
-		{name: "media type", method: http.MethodPost, path: "/bulk/db", body: `{}`, contentType: "application/json", status: 415, code: "unsupported_media_type"},
-		{name: "empty import", method: http.MethodPost, path: "/bulk/db", contentType: bulkMediaType, status: 400, code: "invalid_document"},
-		{name: "missing export", method: http.MethodGet, path: "/bulk/missing", status: 404, code: "database_not_found"},
-		{name: "missing import", method: http.MethodPost, path: "/bulk/missing", body: `{}`, contentType: bulkMediaType, status: 404, code: "database_not_found"},
+		{name: "query import", method: http.MethodPost, path: "/db/db?x=1", body: `{}`, contentType: bulkMediaType, status: 400, code: "invalid_query"},
+		{name: "invalid name", method: http.MethodPost, path: "/db/Bad", contentType: bulkMediaType, status: 400, code: "invalid_name"},
+		{name: "media type", method: http.MethodPost, path: "/db/db", body: `{}`, contentType: "text/plain", status: 415, code: "unsupported_media_type"},
+		{name: "empty import", method: http.MethodPost, path: "/db/db", contentType: bulkMediaType, status: 400, code: "invalid_document"},
+		{name: "missing import", method: http.MethodPost, path: "/db/missing", body: `{}`, contentType: bulkMediaType, status: 404, code: "database_not_found"},
 	}
 
 	for _, tt := range tests {
@@ -115,8 +112,6 @@ func TestBulkRequestValidationHTTP(t *testing.T) {
 		})
 	}
 
-	res := sendRequest(t, server, http.MethodPut, "/bulk/db", "", "")
-	checkResponse(t, res, http.StatusMethodNotAllowed, `{"error":{"code":"method_not_allowed","message":"Method is not allowed"}}`)
 }
 
 func TestBulkImportErrorsHTTP(t *testing.T) {
@@ -144,7 +139,7 @@ func TestBulkImportErrorsHTTP(t *testing.T) {
 				t.Fatalf("createDB() error = %v", err)
 			}
 
-			res := sendRequest(t, server, http.MethodPost, "/bulk/db", tt.body, bulkMediaType)
+			res := sendRequest(t, server, http.MethodPost, "/db/db", tt.body, bulkMediaType)
 			body := readResponse(t, res)
 			if res.StatusCode != tt.status || tt.line != 0 && !strings.Contains(body, `"line":`+strconv.Itoa(tt.line)) {
 				t.Errorf("response = %d %s, want status %d line %d", res.StatusCode, body, tt.status, tt.line)
@@ -174,7 +169,7 @@ func TestBulkLimitsHTTP(t *testing.T) {
 		}
 		defer api.freeBulkSlot()
 
-		res := sendRequest(t, server, http.MethodGet, "/bulk/db", "", "")
+		res := sendRequest(t, server, http.MethodPost, "/db/db", "{}", bulkMediaType)
 		body := readResponse(t, res)
 		if res.StatusCode != http.StatusTooManyRequests || !strings.Contains(body, `"code":"bulk_limit"`) {
 			t.Errorf("response = %d %s", res.StatusCode, body)
@@ -189,7 +184,7 @@ func TestBulkLimitsHTTP(t *testing.T) {
 			t.Fatalf("createDB() error = %v", err)
 		}
 
-		res := sendRequest(t, server, http.MethodPost, "/bulk/db", `{}`, bulkMediaType)
+		res := sendRequest(t, server, http.MethodPost, "/db/db", `{}`, bulkMediaType)
 		body := readResponse(t, res)
 		if res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"bulk_timeout"`) {
 			t.Errorf("response = %d %s", res.StatusCode, body)
@@ -212,7 +207,7 @@ func TestBulkTimeoutInterruptsBodyRead(t *testing.T) {
 		t.Fatalf("net.Dial() error = %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := fmt.Fprint(conn, "POST /bulk/db HTTP/1.1\r\nHost: test\r\nContent-Type: application/x-ndjson\r\nContent-Length: 2\r\n\r\n"); err != nil {
+	if _, err := fmt.Fprint(conn, "POST /db/db HTTP/1.1\r\nHost: test\r\nContent-Type: application/x-ndjson\r\nContent-Length: 2\r\n\r\n"); err != nil {
 		t.Fatalf("write request error = %v", err)
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -228,11 +223,8 @@ func TestBulkTimeoutInterruptsBodyRead(t *testing.T) {
 		t.Errorf("response = %d %s", res.StatusCode, body)
 	}
 
-	res = sendRequest(t, server, http.MethodGet, "/bulk/db", "", "")
-	if res.StatusCode != http.StatusOK {
-		t.Errorf("bulk slot remained occupied: status = %d", res.StatusCode)
-	}
-	_ = readResponse(t, res)
+	res = sendRequest(t, server, http.MethodPost, "/db/db", "{}", bulkMediaType)
+	checkResponse(t, res, http.StatusOK, `{"success":true,"error":{}}`)
 }
 
 func newBulkTestServer(t *testing.T, maxBodyBytes int64, bulk bulkConfig) (*store, *httptest.Server) {

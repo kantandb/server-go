@@ -1,7 +1,7 @@
 # KantanDB server
 
 KantanDB is an encrypted JSON document database with secondary indexes and
-JSONPath queries over HTTP.
+jq queries over HTTP.
 
 ## Start the server
 
@@ -22,7 +22,7 @@ older plaintext store.
 
 The examples below use [`xh`](https://github.com/ducaale/xh). See the
 [OpenAPI contract](openapi.yaml) for complete request and response schemas.
-JSONPath queries use the HTTP `QUERY` method, so OpenAPI tooling must support
+jq queries use the HTTP `QUERY` method, so OpenAPI tooling must support
 version 3.2.
 
 ### Usage examples
@@ -48,29 +48,13 @@ xh POST localhost:8080/db/example name=KantanDB \
 # Read the database name, index definitions, and document count.
 xh GET localhost:8080/db/example
 
-# List documents without a filter.
-echo '{"limit":100}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
+# List document bodies.
+printf '%s\n' '.' | \
+  xh QUERY localhost:8080/db/example Content-Type:text/plain
 
-# Query the email index. op defaults to eq.
-echo '{"index":"email","value":"alice@example.com","limit":100}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
-
-# Find documents whose indexed age is at least 30.
-echo '{"index":"age","op":"ge","value":30,"limit":100}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
-
-# Query any JSONPath without putting it in the URI.
-echo '{"path":"$.age","op":"ge","value":30,"limit":100}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
-
-# Continue a JSONPath query with its opaque cursor.
-echo '{"path":"$.age","op":"ge","value":30,"cursor":"eyJ..."}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
-
-# Continue an index query with its opaque cursor.
-echo '{"index":"age","op":"ge","value":30,"cursor":"eyJ..."}' | \
-  xh QUERY localhost:8080/db/example Content-Type:application/json
+# Return names of documents whose age is at least 30.
+printf '%s\n' 'select(.age >= 30) | .name' | \
+  xh QUERY localhost:8080/db/example Content-Type:text/plain
 
 # Read a document using the returned ID.
 xh GET localhost:8080/db/example/01950000-0000-7000-8000-000000000001
@@ -91,69 +75,37 @@ echo '[{"op":"replace","path":"/name","value":"Patched"}]' | \
 # Delete a document if it exists.
 xh DELETE localhost:8080/db/example/01950000-0000-7000-8000-000000000001 If-Match:\*
 
-# Export documents as NDJSON.
-xh GET localhost:8080/bulk/example --download --output example.ndjson
+# Export documents as NDJSON. Check the Query-Status trailer before using the file.
+curl -sS --fail-with-body -X QUERY http://localhost:8080/db/example \
+  -H 'Content-Type: text/plain' -H 'Accept: application/x-ndjson' \
+  --data-binary '.' -D export.headers -o example.ndjson
 
 # Import them with new IDs and revisions.
-xh POST localhost:8080/bulk/target \
+xh POST localhost:8080/db/target \
   Content-Type:application/x-ndjson < example.ndjson
 
 # Delete a database.
 xh DELETE localhost:8080/db/example
 ```
 
-### Query results
+### jq queries
 
-`QUERY /db/{database}` accepts `{}` to list all documents. Add `limit` and
-`cursor` for pagination, or an index or JSONPath filter. Results have this shape:
+Send a raw jq program as `text/plain`. KantanDB runs it on each document.
+By default, the response wraps all jq outputs in a JSON array. Set
+`Accept: application/x-ndjson` to stream one jq output per line. A final
+`Query-Status: ok` trailer confirms the stream finished.
 
-```json
-{"documents":[{"id":"0195…","rev":"0123456789abcdef0123456789abcdef","doc":{"name":"Alice"}}],"cursor":""}
-```
-
-Each page reads matches, bodies, and revisions from one storage snapshot.
-`rev` is the ETag value without quotes; quote it for `If-Match`.
-Pages have an 8 MiB serialized-record budget, but always permit one record.
-A cursor continues pages cut short by document count, byte budget, or scan work.
-`GET /db/{database}` returns `name`, `indices`, and `doc_count`, not documents.
-
-### Index queries
-
-Index queries support `eq`, `lt`, `le`, `gt`, and `ge`; the default is `eq`.
-Equality works with any JSON scalar. Ordering works with numbers and strings.
-Types are not coerced, and missing paths, objects, arrays, or values of another
-type do not match. Numbers are compared exactly. Strings use binary UTF-8
-order.
-
-Range results are ordered by indexed value, then document ID. Equality results
-are ordered by document ID. Each query reads one page plus at most one extra
-valid index entry. To fetch the next page, reuse the returned cursor with the
-same database, index, operator, and value.
-
-### JSONPath queries
-
-Send either `{"index":"age","op":"ge","value":30}` or a JSONPath query in the
-body of `QUERY /db/{database}`. For a filter, supply exactly one of `index` or `path`.
-A named index uses its JSON Pointer semantics, including array positions; an unknown
-index returns `404 index_not_found`. Without `index`, automatic selection and scan
-fallback remain unchanged.
-
-For an RFC 9535 JSONPath query, a document
-matches when any selected scalar satisfies the comparison.
-
-A simple path uses its declared index unless it contains a numeric token. Other
-paths scan documents in ID order. A scan examines no more than 10,000 documents
-per page and stops after five seconds.
-
-The request body is limited to 64 KiB and the path to 256 bytes. A path may have
-one descendant and one selector per segment. Evaluation visits at most 1,000,000
-JSON nodes per document.
+Queries do not return IDs, revisions, or cursors. They do not use indexes.
+Restrict access to trusted clients. See the [query guide](docs/query-language.md)
+for limits and examples.
 
 ### Bulk transfer
 
-`GET /bulk/{database}` streams canonical documents as NDJSON from one Pebble
-snapshot. `POST /bulk/{database}` accepts that stream, assigns new UUIDv7 IDs
-and revisions, applies the target database's indexes, and commits it atomically.
+`QUERY` with `.` exports documents as NDJSON when you request that format.
+Send `Content-Type: application/x-ndjson` to `POST /db/{database}` to import a batch.
+KantanDB assigns new UUIDv7 IDs and revisions and updates the documents and indexes in one commit.
+The batch returns `200 OK`, even for one line. A JSON object sent as
+`application/json` still returns `201 Created`.
 
 Defaults allow 1 MiB per document, 64 MiB and 1,000 documents per import, a
 128 MiB Pebble batch, 30 seconds, and one bulk request at a time. Configure them

@@ -14,7 +14,6 @@ tags:
   - name: Service
   - name: Databases
   - name: Documents
-  - name: Bulk
 paths:
   /healthz:
     get:
@@ -160,7 +159,13 @@ paths:
     post:
       tags: [Documents]
       operationId: createDocument
-      summary: Create a document
+      summary: Create one document or import a batch
+      description: |
+        Use application/json for one document or application/x-ndjson for a batch.
+        The server commits the entire batch or none of it. It assigns new IDs and
+        revisions and updates the indexes. The batch defaults are 1 MiB per document,
+        64 MiB total, 1,000 documents, a 128 MiB batch, 30 seconds, and one concurrent
+        import. Batch imports reject URI query parameters.
       requestBody:
         required: true
         content:
@@ -170,7 +175,24 @@ paths:
             example:
               name: Alice
               active: true
+          application/x-ndjson:
+            schema:
+              type: string
+              minLength: 1
+              description: NDJSON containing one JSON object per line.
+            example: |
+              {"name":"Alice"}
+              {"name":"Bob"}
       responses:
+        "200":
+          description: Every document was imported.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkResult"
+              example:
+                success: true
+                error: {}
         "201":
           description: The document was created.
           headers:
@@ -183,51 +205,81 @@ paths:
               schema:
                 $ref: "#/components/schemas/DocumentCreated"
         "400":
-          $ref: "#/components/responses/BadRequest"
-          description: The database name or document is invalid.
+          description: The database name, document, or import parameters are invalid.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/BulkResult"
         "404":
-          $ref: "#/components/responses/NotFound"
           description: The database does not exist.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/BulkResult"
         "413":
-          $ref: "#/components/responses/ContentTooLarge"
+          description: The document or import exceeds a size or count limit.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/BulkResult"
         "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
+          description: Content-Type must be application/json or application/x-ndjson.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/BulkLimited"
         "500":
-          $ref: "#/components/responses/InternalError"
+          description: Stored data is corrupt or an unexpected server error occurred.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/BulkResult"
         "503":
-          $ref: "#/components/responses/ServiceUnavailable"
+          description: Storage is unavailable or the import deadline was exceeded.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - $ref: "#/components/schemas/BulkResult"
 
     query:
       tags: [Documents]
       operationId: queryDocuments
-      summary: List or filter documents
+      summary: Run a jq program against document bodies
       description: |
-        An empty JSON object lists all documents. Optional limit and cursor fields
-        paginate the list. For a filter, supply exactly one of index or path and
-        a value. Named indexes use JSON Pointer semantics; paths use automatic
-        index selection or scans. Results contain id, rev, and doc from one snapshot.
-        Pages have an 8 MiB serialized-record budget but always permit one record.
-        URI query parameters, unknown or duplicate fields, and trailing
-        JSON are rejected. Equality accepts any JSON scalar. Ordering accepts
-        only JSON numbers and strings. Requests are limited to 64 KiB and five
-        seconds. Scan queries examine at most 10,000 documents per page.
+        jq runs on document bodies in document-ID order from one snapshot, like
+        jq without -s. KantanDB does not use secondary indexes or return cursors.
+        Accept selects buffered JSON (default) or streamed NDJSON.
+        For NDJSON, require the final Query-Status: ok trailer to confirm completion.
+        Errors before streaming use an HTTP error status and a JSON body.
+        Errors after streaming starts use Query-Status: error.
+        Only trusted clients can use this endpoint safely. The execution
+        deadline does not cap memory allocated by the program.
       externalDocs:
         description: Query language
         url: docs/query-language.md
       requestBody:
         required: true
         content:
-          application/json:
+          text/plain:
             schema:
-              $ref: "#/components/schemas/PathQuery"
-            example:
-              path: $.profile.age
-              op: ge
-              value: 18
-              limit: 100
+              type: string
+              minLength: 1
+            example: select(.age >= 18) | .name
       responses:
         "200":
-          description: A page of documents with IDs and unquoted revisions.
+          description: The jq outputs in order, wrapped in a JSON array or encoded as one JSON value per line.
           headers:
             Accept-Query:
               $ref: "#/components/headers/AcceptQuery"
@@ -236,17 +288,45 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DocumentList"
+                type: array
+                items: {}
+              example: ["Alice"]
+            application/x-ndjson:
+              schema:
+                type: string
+                description: One compact JSON value per line, with no array wrapper.
+              example: |
+                "Alice"
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: The database name, request body, query, or cursor is invalid.
+          description: The database name or program is invalid, or the program failed.
         "404":
           $ref: "#/components/responses/NotFound"
-          description: The database or named index does not exist.
+          description: The database does not exist.
+        "406":
+          description: Accept does not allow JSON or NDJSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
         "413":
           $ref: "#/components/responses/ContentTooLarge"
         "415":
-          $ref: "#/components/responses/UnsupportedMediaType"
+          description: Content-Type must be text/plain with UTF-8 encoding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          description: Another query is in progress.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+              example:
+                error:
+                  code: query_busy
+                  message: Too many queries
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -287,88 +367,6 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
-
-  /bulk/{database}:
-    parameters:
-      - $ref: "#/components/parameters/Database"
-
-    get:
-      tags: [Bulk]
-      operationId: exportDocuments
-      summary: Export documents as NDJSON
-      description: |
-        Streams one snapshot in lexical source-ID order. Each line is a stored
-        JSON document without its ID, revision, or ETag. This is a logical
-        transfer, not a backup format. URI query parameters are rejected.
-      responses:
-        "200":
-          description: Canonical documents, one per line. An empty database returns an empty body.
-          headers:
-            Cache-Control:
-              $ref: "#/components/headers/NoStore"
-          content:
-            application/x-ndjson:
-              schema:
-                type: string
-                description: NDJSON containing one JSON object per line.
-              example: |
-                {"name":"Alice"}
-                {"name":"Bob"}
-        "400":
-          $ref: "#/components/responses/BulkBadRequest"
-        "404":
-          $ref: "#/components/responses/BulkNotFound"
-        "429":
-          $ref: "#/components/responses/BulkLimited"
-        "500":
-          $ref: "#/components/responses/BulkInternalError"
-        "503":
-          $ref: "#/components/responses/BulkUnavailable"
-
-    post:
-      tags: [Bulk]
-      operationId: importDocuments
-      summary: Import documents from NDJSON
-      description: |
-        Creates new IDs and revisions, applies current indexes, and commits all
-        documents in one synced Pebble batch. The default limits are 1 MiB per
-        document, 64 MiB total, 1,000 documents, a 128 MiB batch, 30 seconds,
-        and one concurrent bulk request. URI query parameters are rejected.
-      requestBody:
-        required: true
-        content:
-          application/x-ndjson:
-            schema:
-              type: string
-              minLength: 1
-              description: NDJSON containing one JSON object per line.
-            example: |
-              {"name":"Alice"}
-              {"name":"Bob"}
-      responses:
-        "200":
-          description: Every document was imported.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BulkResult"
-              example:
-                success: true
-                error: {}
-        "400":
-          $ref: "#/components/responses/BulkBadRequest"
-        "404":
-          $ref: "#/components/responses/BulkNotFound"
-        "413":
-          $ref: "#/components/responses/BulkTooLarge"
-        "415":
-          $ref: "#/components/responses/BulkUnsupportedMediaType"
-        "429":
-          $ref: "#/components/responses/BulkLimited"
-        "500":
-          $ref: "#/components/responses/BulkInternalError"
-        "503":
-          $ref: "#/components/responses/BulkUnavailable"
 
   /db/{database}/{id}:
     parameters:
@@ -585,33 +583,6 @@ components:
           items:
             $ref: "#/components/schemas/Name"
 
-    DocumentList:
-      type: object
-      additionalProperties: false
-      required: [documents, cursor]
-      properties:
-        documents:
-          type: array
-          items:
-            $ref: "#/components/schemas/DocumentRecord"
-        cursor:
-          type: string
-          description: Empty on the final page; otherwise pass it unchanged to the next request.
-
-    DocumentRecord:
-      type: object
-      additionalProperties: false
-      required: [id, rev, doc]
-      properties:
-        id:
-          $ref: "#/components/schemas/DocumentID"
-        rev:
-          type: string
-          description: Current ETag value without quotes. Add quotes for If-Match.
-          pattern: "^[0-9a-f]{32}$"
-        doc:
-          $ref: "#/components/schemas/Document"
-
     DocumentCreated:
       type: object
       additionalProperties: false
@@ -630,54 +601,6 @@ components:
       type: object
       additionalProperties: true
       description: An arbitrary JSON object.
-
-    Scalar:
-      type: [string, number, boolean, "null"]
-      description: A JSON string, number, boolean, or null.
-
-    Operator:
-      type: string
-      enum: [eq, lt, le, gt, ge]
-      default: eq
-
-    PathQuery:
-      type: object
-      additionalProperties: false
-      oneOf:
-        - required: [path, value]
-          not:
-            required: [index]
-        - required: [index, value]
-          not:
-            required: [path]
-        - not:
-            anyOf:
-              - required: [index]
-              - required: [path]
-              - required: [op]
-              - required: [value]
-      properties:
-        index:
-          type: string
-          description: Index name. For a filter, supply exactly one of index or path.
-          pattern: "^[a-z][a-z0-9_-]{0,62}$"
-        path:
-          type: string
-          description: RFC 9535 JSONPath.
-          minLength: 1
-          maxLength: 256
-        value:
-          $ref: "#/components/schemas/Scalar"
-        op:
-          $ref: "#/components/schemas/Operator"
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 1000
-          default: 100
-        cursor:
-          type: string
-          default: ""
 
     MergePatch:
       type: object
@@ -756,7 +679,6 @@ components:
         - database_exists
         - database_not_found
         - document_not_found
-        - index_not_found
         - internal_error
         - invalid_cursor
         - invalid_document
@@ -768,8 +690,11 @@ components:
         - invalid_query
         - invalid_request
         - method_not_allowed
+        - not_acceptable
         - precondition_failed
+        - query_busy
         - query_limit
+        - query_runtime
         - query_timeout
         - route_not_found
         - service_unavailable
@@ -828,7 +753,7 @@ components:
       description: Supported media type for QUERY request bodies.
       schema:
         type: string
-        const: application/json
+        const: text/plain
 
     Allow:
       description: Methods supported by the document collection.
@@ -855,56 +780,6 @@ components:
         const: no-store
 
   responses:
-    BulkBadRequest:
-      description: The database name, URI query, or input document is invalid.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
-          example:
-            success: false
-            error:
-              code: invalid_document
-              line: 2
-              message: Document must be a JSON object
-
-    BulkNotFound:
-      description: The database does not exist.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
-          example:
-            success: false
-            error:
-              code: database_not_found
-              message: Database does not exist
-
-    BulkTooLarge:
-      description: The import exceeds a size, count, or batch limit.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
-          example:
-            success: false
-            error:
-              code: content_too_large
-              line: 1001
-              message: Bulk import exceeds a size or count limit
-
-    BulkUnsupportedMediaType:
-      description: Content-Type must be application/x-ndjson.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
-          example:
-            success: false
-            error:
-              code: unsupported_media_type
-              message: Content-Type must be application/x-ndjson
-
     BulkLimited:
       description: The concurrent bulk request limit was reached.
       content:
@@ -916,20 +791,6 @@ components:
             error:
               code: bulk_limit
               message: Too many bulk requests
-
-    BulkInternalError:
-      description: Stored data is corrupt or an unexpected server error occurred.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
-
-    BulkUnavailable:
-      description: Storage is unavailable or the bulk deadline was exceeded.
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/BulkResult"
 
     BadRequest:
       description: The request is invalid.
@@ -958,6 +819,11 @@ components:
                 error:
                   code: invalid_query
                   message: Query is invalid
+            queryRuntime:
+              value:
+                error:
+                  code: query_runtime
+                  message: Query execution failed
             invalidCursor:
               value:
                 error:
@@ -991,11 +857,6 @@ components:
                 error:
                   code: database_not_found
                   message: Database does not exist
-            index:
-              value:
-                error:
-                  code: index_not_found
-                  message: Index does not exist
             document:
               value:
                 error:

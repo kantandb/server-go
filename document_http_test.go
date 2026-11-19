@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -52,71 +51,6 @@ func TestDocumentLifecycleHTTP(t *testing.T) {
 
 	res = sendRequest(t, server, http.MethodGet, "/db/dbname/"+created.ID, "", "")
 	checkResponse(t, res, http.StatusNotFound, `{"error":{"code":"document_not_found","message":"Document does not exist"}}`)
-}
-
-func TestQueryAllDocumentsHTTP(t *testing.T) {
-	t.Parallel()
-
-	server := newTestServer(t, defaultMaxBodyBytes)
-	res := sendRequest(t, server, http.MethodPost, "/db", `{"name":"dbname"}`, "application/json")
-	checkResponse(t, res, http.StatusCreated, `{"name":"dbname"}`)
-
-	res = sendRequest(t, server, queryMethod, "/db/dbname", `{}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":[],"cursor":""}`)
-
-	var ids []string
-	for range 3 {
-		res = sendRequest(t, server, http.MethodPost, "/db/dbname", `{}`, "application/json")
-		if res.StatusCode != http.StatusCreated {
-			t.Fatalf("status = %d, want %d; body = %s", res.StatusCode, http.StatusCreated, readResponse(t, res))
-		}
-
-		var created docResponse
-		if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
-			t.Fatalf("Decode() error = %v", err)
-		}
-		if err := res.Body.Close(); err != nil {
-			t.Errorf("Response.Body.Close() error = %v", err)
-		}
-		ids = append(ids, created.ID)
-	}
-	slices.Sort(ids)
-
-	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"limit":2}`, "application/json")
-	var page idPage
-	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
-		t.Fatalf("Decode() error = %v", err)
-	}
-	if err := res.Body.Close(); err != nil {
-		t.Errorf("Response.Body.Close() error = %v", err)
-	}
-	if !slices.Equal(page.Documents, ids[:2]) {
-		t.Errorf("documents = %v, want %v", page.Documents, ids[:2])
-	}
-	if page.Cursor == "" || page.Cursor == ids[1] {
-		t.Fatalf("cursor = %q, want opaque cursor", page.Cursor)
-	}
-	cursor := page.Cursor
-
-	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"limit":1,"cursor":"`+cursor+`"}`, "application/json")
-	page = idPage{}
-	if err := json.NewDecoder(res.Body).Decode(&page); err != nil {
-		t.Fatalf("Decode() error = %v", err)
-	}
-	if err := res.Body.Close(); err != nil {
-		t.Errorf("Response.Body.Close() error = %v", err)
-	}
-	if want := ids[2:]; !slices.Equal(page.Documents, want) {
-		t.Errorf("documents after cursor = %v, want %v", page.Documents, want)
-	}
-	if page.Cursor != "" {
-		t.Errorf("final cursor = %q, want empty", page.Cursor)
-	}
-
-	res = sendRequest(t, server, http.MethodDelete, "/db/dbname/"+ids[2], "", "")
-	checkResponse(t, res, http.StatusNoContent, "")
-	res = sendRequest(t, server, queryMethod, "/db/dbname", `{"cursor":"`+cursor+`"}`, "application/json")
-	checkResponse(t, res, http.StatusOK, `{"documents":[],"cursor":""}`)
 }
 
 func TestDatabaseInfoValidationHTTP(t *testing.T) {

@@ -11,6 +11,22 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
+func exportDocsForTest(ctx context.Context, s *store, database string, yield func([]byte) error) error {
+	return s.scanDocs(database, func(next func(context.Context) ([]byte, error)) error {
+		for {
+			doc, err := next(ctx)
+			if err != nil || doc == nil {
+				return err
+			}
+			err = yield(doc)
+			clear(doc)
+			if err != nil {
+				return err
+			}
+		}
+	})
+}
+
 func TestExportDocs(t *testing.T) {
 	t.Parallel()
 
@@ -33,7 +49,7 @@ func TestExportDocs(t *testing.T) {
 	}
 
 	var got []string
-	err := store.exportDocs(t.Context(), "db", func(document []byte) error {
+	err := exportDocsForTest(t.Context(), store, "db", func(document []byte) error {
 		got = append(got, string(document))
 
 		return nil
@@ -58,7 +74,7 @@ func TestExportDocsSnapshot(t *testing.T) {
 	}
 
 	var got []string
-	err := store.exportDocs(t.Context(), "db", func(document []byte) error {
+	err := exportDocsForTest(t.Context(), store, "db", func(document []byte) error {
 		got = append(got, string(document))
 		if len(got) == 1 {
 			_, err := store.createDocWithID("db", "01950000-0000-7000-8000-000000000002", []byte(`{"value":2}`))
@@ -86,7 +102,7 @@ func TestExportDocsErrors(t *testing.T) {
 		if err := store.createDB("db"); err != nil {
 			t.Fatalf("createDB() error = %v", err)
 		}
-		if err := store.exportDocs(t.Context(), "db", func([]byte) error {
+		if err := exportDocsForTest(t.Context(), store, "db", func([]byte) error {
 			t.Fatal("empty database yielded a document")
 
 			return nil
@@ -99,7 +115,7 @@ func TestExportDocsErrors(t *testing.T) {
 		t.Parallel()
 
 		store := testStore(t)
-		err := store.exportDocs(t.Context(), "missing", func([]byte) error { return nil })
+		err := exportDocsForTest(t.Context(), store, "missing", func([]byte) error { return nil })
 		if !errors.Is(err, errDBNotFound) {
 			t.Fatalf("exportDocs() error = %v, want %v", err, errDBNotFound)
 		}
@@ -118,7 +134,7 @@ func TestExportDocsErrors(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		err := store.exportDocs(ctx, "db", func([]byte) error { return nil })
+		err := exportDocsForTest(ctx, store, "db", func([]byte) error { return nil })
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("exportDocs() error = %v, want %v", err, context.Canceled)
 		}
@@ -135,7 +151,7 @@ func TestExportDocsErrors(t *testing.T) {
 			t.Fatalf("createDocWithID() error = %v", err)
 		}
 
-		err := store.exportDocs(t.Context(), "db", func([]byte) error { return nil })
+		err := exportDocsForTest(t.Context(), store, "db", func([]byte) error { return nil })
 		if !errors.Is(err, errCorruptData) {
 			t.Fatalf("exportDocs() error = %v, want %v", err, errCorruptData)
 		}
@@ -153,7 +169,7 @@ func TestExportDocsErrors(t *testing.T) {
 			t.Fatalf("Set() error = %v", err)
 		}
 
-		err := store.exportDocs(t.Context(), "db", func([]byte) error { return nil })
+		err := exportDocsForTest(t.Context(), store, "db", func([]byte) error { return nil })
 		if !errors.Is(err, errCorruptData) {
 			t.Fatalf("exportDocs() error = %v, want %v", err, errCorruptData)
 		}
@@ -172,7 +188,7 @@ func TestExportBlocksDeletion(t *testing.T) {
 	}
 
 	deleted := make(chan error, 1)
-	err := store.exportDocs(t.Context(), "db", func([]byte) error {
+	err := exportDocsForTest(t.Context(), store, "db", func([]byte) error {
 		go func() { deleted <- store.deleteDB("db") }()
 
 		select {

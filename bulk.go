@@ -13,8 +13,7 @@ import (
 )
 
 const (
-	bulkMediaType  = "application/x-ndjson"
-	bulkBufferSize = 32 << 10
+	bulkMediaType = "application/x-ndjson"
 )
 
 var (
@@ -155,47 +154,6 @@ func trimLineEnd(line []byte, complete bool) []byte {
 	line = bytes.TrimSuffix(line, []byte{'\r'})
 
 	return line
-}
-
-type bulkStream struct {
-	writer   http.ResponseWriter
-	buffered *bufio.Writer
-	pending  int
-	started  bool
-}
-
-func newBulkStream(writer http.ResponseWriter) *bulkStream {
-	return &bulkStream{writer: writer, buffered: bufio.NewWriterSize(writer, bulkBufferSize)}
-}
-
-func (s *bulkStream) write(document []byte) error {
-	if !s.started {
-		s.writer.WriteHeader(http.StatusOK)
-		s.started = true
-	}
-
-	if _, err := s.buffered.Write(document); err != nil {
-		return err
-	}
-	if err := s.buffered.WriteByte('\n'); err != nil {
-		return err
-	}
-
-	s.pending += len(document) + 1
-	if s.pending < bulkBufferSize {
-		return nil
-	}
-
-	return s.flush()
-}
-
-func (s *bulkStream) flush() error {
-	if err := s.buffered.Flush(); err != nil {
-		return err
-	}
-	s.pending = 0
-
-	return http.NewResponseController(s.writer).Flush()
 }
 
 func writeBulkSuccess(w http.ResponseWriter) {

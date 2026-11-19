@@ -104,10 +104,6 @@ func TestPurposeKeys(t *testing.T) {
 
 	databaseKey := bytes.Repeat([]byte{1}, keySize)
 	otherDatabaseKey := bytes.Repeat([]byte{2}, keySize)
-	cursor, err := deriveCursorKey(databaseKey)
-	if err != nil {
-		t.Fatalf("deriveCursorKey() error = %v", err)
-	}
 	document, err := deriveDocumentKey(databaseKey, "id")
 	if err != nil {
 		t.Fatalf("deriveDocumentKey() error = %v", err)
@@ -121,7 +117,7 @@ func TestPurposeKeys(t *testing.T) {
 		t.Fatalf("deriveDocumentKey(other database) error = %v", err)
 	}
 
-	keys := [][]byte{cursor, document, otherDocument, otherDatabase}
+	keys := [][]byte{document, otherDocument, otherDatabase}
 	for i := range keys {
 		if len(keys[i]) != keySize {
 			t.Fatalf("key %d length = %d, want %d", i, len(keys[i]), keySize)
