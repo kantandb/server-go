@@ -29,11 +29,16 @@ It also supports these predicates on top-level fields:
 - `.name | endswith("e")`, `.name | contains("ar")`, and `.name | test("^A.*e$")` scan the string entries on `/name`. KantanDB tests each indexed value before fetching the document.
 
 KantanDB removes duplicate candidates and runs the original jq program in document-ID order.
+For up to 32 lists of IDs grouped by indexed value, it can merge the lists as jq requests documents.
+This lets jq stop without reading the remaining IDs.
 
-Queries without a matching index or with an unsupported program use a full scan.
-For example, programs that use `input` or `inputs` still read the full scan.
-KantanDB uses a full document scan if the plan needs more than 32 index scans or finds more than 10,000 candidates.
-Only `endswith`, `contains`, and `test` can read past the 10,000-entry index scan limit.
+A query such as `limit(10; (., inputs) | (select(.category >= 3) | .name)), halt` can use the same index as its `select` filter.
+The limit applies to outputs, and `halt` ends the scan after the limit.
+Other uses of `input` or `inputs` still use a full document scan.
+
+If the merge does not apply, KantanDB collects and sorts the candidate IDs before running jq.
+It uses a full document scan if no plan applies or the collector exceeds its 10,000-entry budget.
+The `endswith`, `contains`, and `test` scans can read more entries but still collect at most 10,000 unique IDs.
 
 Index bounds use the stored value type and exact numeric values, not jq comparison rules.
 For example, jq considers `"90000"` greater than `100000`, but the index excludes it from a numeric range.
@@ -47,6 +52,6 @@ The server sends the first NDJSON line immediately and groups later lines into b
 
 ## Limits
 
-KantanDB accepts one query at a time. The program can contain up to 64 KiB of source, subject to the server request limit. JSON mode allows up to 10,000 input documents, 64 MiB of input, 8 MiB of output, and five seconds for the query. NDJSON has no total count or byte limit. It has a five-second deadline for each document evaluation and each write.
+The program can contain up to 64 KiB of source, subject to the server request limit. JSON mode allows up to 10,000 input documents, 64 MiB of input, 8 MiB of output, and five seconds for the query. NDJSON has no total count or byte limit. It has a five-second deadline for each document evaluation and each write.
 
 Restrict QUERY to trusted clients. Deadlines do not cap allocations. For example, `[., inputs]` collects all remaining documents in memory. KantanDB uses [gojq](https://github.com/itchyny/gojq#difference-to-jq) and does not expose local modules or environment variables. QUERY does not accept URI query parameters or return cursors.

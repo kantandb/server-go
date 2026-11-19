@@ -92,7 +92,7 @@ func TestJQAcceptHTTP(t *testing.T) {
 	}
 }
 
-func TestQueryFlushesEarly(t *testing.T) {
+func TestQueryStreamsConcurrently(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer(t, defaultMaxBodyBytes)
@@ -121,6 +121,19 @@ func TestQueryFlushesEarly(t *testing.T) {
 	if res.StatusCode != http.StatusOK || line != "1\n" || err != nil {
 		t.Fatalf("status = %d, first line = %q, err = %v", res.StatusCode, line, err)
 	}
+
+	// The first query is still running when the second query starts.
+	req, err = http.NewRequestWithContext(ctx, queryMethod, server.URL+"/db/users", strings.NewReader(`2`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", queryMediaType)
+	req.Header.Set("Accept", queryJSON)
+	second, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkResponse(t, second, http.StatusOK, `[2]`)
 }
 
 func TestNDJSONExceedsBuffer(t *testing.T) {
@@ -168,18 +181,6 @@ func TestJQErrorsHTTP(t *testing.T) {
 			t.Errorf("status = %d, body = %s; want %d %s", res.StatusCode, body, tt.status, tt.code)
 		}
 	}
-}
-
-func TestJQBusyHTTP(t *testing.T) {
-	t.Parallel()
-
-	a := newAPI(testStore(t), defaultMaxBodyBytes, discardLogger())
-	a.querySlots <- struct{}{}
-	req := httptest.NewRequest(queryMethod, "/db/users", strings.NewReader("."))
-	req.Header.Set("Content-Type", "text/plain")
-	res := httptest.NewRecorder()
-	a.handler().ServeHTTP(res, req)
-	checkResponse(t, res.Result(), http.StatusTooManyRequests, `{"error":{"code":"query_busy","message":"Too many queries"}}`)
 }
 
 func sendNDJSONQuery(t *testing.T, server *httptest.Server, path, program string) *http.Response {

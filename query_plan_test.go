@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -20,6 +21,11 @@ func TestPlanQuery(t *testing.T) {
 	}{
 		{`select(.salary > 100000) | .name`, "/salary", cmpGT, json.Number("100000")},
 		{`select(.category == 42)`, "/category", cmpEq, json.Number("42")},
+		{`limit(3; (., inputs) | (select(.category >= 3) | .id)), halt`, "/category", cmpGE, json.Number("3")},
+		{program: `limit(3; (., inputs) | select(.category >= 3))`},
+		{program: `limit(.n; (., inputs) | select(.category >= 3)), halt`},
+		{program: `limit(3; inputs | select(.category >= 3)), halt`},
+		{program: `limit(3; (., inputs) | (select(.category >= 3) | input)), halt`},
 		{`select(."a/b~c" <= "yes") | .`, "/a~1b~0c", cmpLE, "yes"},
 		{`select(.salary >= -1.5)`, "/salary", cmpGE, json.Number("-1.5")},
 		{`select(.salary < 100)`, "/salary", cmpLT, json.Number("100")},
@@ -162,6 +168,74 @@ func TestIndexStringFilters(t *testing.T) {
 		if err != nil || string(result) != tt.want {
 			t.Errorf("%s = %s, %v; want %s", tt.program, result, err, tt.want)
 		}
+	}
+}
+
+func TestLimitedIndexMerge(t *testing.T) {
+	t.Parallel()
+
+	s := testStore(t)
+	if err := s.createDB("users", indexDef{name: "category", path: "/category"}); err != nil {
+		t.Fatal(err)
+	}
+	for id, body := range map[string]string{
+		indexTestIDA: `{"category":4,"id":1}`,
+		indexTestIDB: `{"category":2,"id":2}`,
+		indexTestIDC: `{"category":3,"id":3}`,
+		indexTestIDZ: `{"category":2,"id":4}`,
+		indexTestIDE: `{"category":5,"id":5}`,
+		indexTestIDF: `{"category":3,"id":6}`,
+		indexTestIDG: `{"category":3,"id":7}`,
+	} {
+		if _, err := s.createDocWithID("users", id, []byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const program = `limit(3; (., inputs) | (select(.category >= 3 or .category == 4) | .id)), halt`
+	check := func(program string) {
+		t.Helper()
+		got, err := s.queryArray(t.Context(), "users", []byte(program))
+		if err != nil || string(got) != `[1,3,5]` {
+			t.Fatalf("%s = %s, %v; want [1,3,5]", program, got, err)
+		}
+	}
+	check(program)
+	check("(" + program + ")")
+
+	// A full scan would read document 2. An eager index scan would read the entry for document 7.
+	if err := s.db.Set(docKey("users", indexTestIDB), []byte("bad record"), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	value, err := encodeIndexValue(json.Number("3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Set(indexKey("users", "category", value, indexTestIDG), []byte("bad entry"), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	check(program)
+}
+
+func TestLimitedIndexMergeFallback(t *testing.T) {
+	t.Parallel()
+
+	s := testStore(t)
+	if err := s.createDB("users", indexDef{name: "category", path: "/category"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range maxMergeLists + 1 {
+		id := fmt.Sprintf("01950000-0000-7000-8000-%012d", i)
+		body := fmt.Appendf(nil, `{"category":%d,"id":%d}`, maxMergeLists-i, i)
+		if _, err := s.createDocWithID("users", id, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const program = `limit(3; (., inputs) | (select(.category >= 0) | .id)), halt`
+	got, err := s.queryArray(t.Context(), "users", []byte(program))
+	if err != nil || string(got) != `[0,1,2]` {
+		t.Fatalf("query = %s, %v; want [0,1,2]", got, err)
 	}
 }
 

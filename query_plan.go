@@ -27,8 +27,62 @@ type indexScan struct {
 	match   func(context.Context, string) (bool, bool)
 }
 
-// Only a leading select and optional field projection can use an index.
 func planQuery(query *gojq.Query) queryPlan {
+	if !plainQuery(query) {
+		return nil
+	}
+	if query.Op == gojq.OpComma && queryCall(query.Right, "halt", 0) != nil {
+		return planLimitedQuery(query.Left)
+	}
+
+	return planSelect(query)
+}
+
+// This form filters the entire input stream once, then ends the query.
+func planLimitedQuery(q *gojq.Query) queryPlan {
+	limit := queryCall(q, "limit", 2)
+	if limit == nil {
+		return nil
+	}
+	generator := ungroup(limit.Args[1])
+	if !plainQuery(generator) || generator.Op != gojq.OpPipe {
+		return nil
+	}
+	input := ungroup(generator.Left)
+	if !plainQuery(input) || input.Op != gojq.OpComma || queryCall(input.Right, "inputs", 0) == nil {
+		return nil
+	}
+	first := simpleTerm(input.Left)
+	if first == nil || first.Type != gojq.TermTypeIdentity {
+		return nil
+	}
+	count := simpleTerm(limit.Args[0])
+	if count == nil || count.Type != gojq.TermTypeNumber || strings.Trim(count.Number, "0123456789") != "" {
+		return nil
+	}
+
+	return planSelect(ungroup(generator.Right))
+}
+
+func queryCall(q *gojq.Query, name string, argc int) *gojq.Func {
+	term := simpleTerm(q)
+	if term == nil || term.Type != gojq.TermTypeFunc || term.Func.Name != name || len(term.Func.Args) != argc {
+		return nil
+	}
+
+	return term.Func
+}
+
+func ungroup(q *gojq.Query) *gojq.Query {
+	for term := simpleTerm(q); term != nil && term.Type == gojq.TermTypeQuery; term = simpleTerm(q) {
+		q = term.Query
+	}
+
+	return q
+}
+
+// Only a leading select and optional field projection can use an index.
+func planSelect(query *gojq.Query) queryPlan {
 	if !plainQuery(query) {
 		return nil
 	}
@@ -303,7 +357,15 @@ func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, 
 			if err != nil {
 				return err
 			}
-			ids, indexed, err := planIDs(ctx, snapshot, database, plan, defs)
+			names := planIndexNames(plan, defs)
+			if names == nil {
+				return scanDocSnapshot(snapshot, database, databaseKey, scan)
+			}
+			merged, err := scanMerged(ctx, snapshot, database, databaseKey, plan, names, scan)
+			if err != nil || merged {
+				return err
+			}
+			ids, indexed, err := planIDs(ctx, snapshot, database, plan, names)
 			if err != nil {
 				return err
 			}
@@ -316,7 +378,7 @@ func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, 
 	})
 }
 
-func planIDs(ctx context.Context, snapshot *pebble.Snapshot, database string, plan queryPlan, defs []indexDef) ([]string, bool, error) {
+func planIndexNames(plan queryPlan, defs []indexDef) map[string]string {
 	names := make(map[string]string, len(defs))
 	for _, def := range defs {
 		if names[def.path] == "" {
@@ -325,10 +387,14 @@ func planIDs(ctx context.Context, snapshot *pebble.Snapshot, database string, pl
 	}
 	for _, scan := range plan {
 		if names[scan.path] == "" {
-			return nil, false, nil
+			return nil
 		}
 	}
 
+	return names
+}
+
+func planIDs(ctx context.Context, snapshot *pebble.Snapshot, database string, plan queryPlan, names map[string]string) ([]string, bool, error) {
 	ids := make(map[string]struct{})
 	remaining := maxScanDocs
 	for _, scan := range plan {

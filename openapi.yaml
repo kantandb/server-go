@@ -320,16 +320,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorEnvelope"
-        "429":
-          description: Another query is in progress.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorEnvelope"
-              example:
-                error:
-                  code: query_busy
-                  message: Too many queries
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -695,7 +685,6 @@ components:
         - method_not_allowed
         - not_acceptable
         - precondition_failed
-        - query_busy
         - query_limit
         - query_runtime
         - query_timeout

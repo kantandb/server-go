@@ -24,7 +24,6 @@ type api struct {
 	maxBodyBytes int64
 	bulk         bulkConfig
 	bulkSlots    chan struct{}
-	querySlots   chan struct{}
 	log          *slog.Logger
 	stopping     atomic.Bool
 }
@@ -109,7 +108,6 @@ func newAPIWithBulk(store *store, maxBodyBytes int64, bulk bulkConfig, log *slog
 		maxBodyBytes: maxBodyBytes,
 		bulk:         bulk,
 		bulkSlots:    make(chan struct{}, bulk.concurrency),
-		querySlots:   make(chan struct{}, queryConcurrency),
 		log:          log,
 	}
 }
@@ -402,15 +400,6 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if charset := params["charset"]; err != nil || mediaType != queryMediaType || charset != "" && !strings.EqualFold(charset, "utf-8") {
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be text/plain with UTF-8 encoding")
-
-		return
-	}
-
-	select {
-	case a.querySlots <- struct{}{}:
-		defer func() { <-a.querySlots }()
-	default:
-		writeError(w, http.StatusTooManyRequests, "query_busy", "Too many queries")
 
 		return
 	}

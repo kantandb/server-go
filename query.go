@@ -11,15 +11,14 @@ import (
 )
 
 const (
-	queryMethod      = "QUERY"
-	queryMediaType   = "text/plain"
-	queryJSON        = "application/json"
-	queryNDJSON      = bulkMediaType
-	maxQueryBody     = 64 << 10
-	maxScanDocs      = 10_000
-	maxScanBytes     = 64 << 20
-	maxQueryBytes    = 8 << 20
-	queryConcurrency = 1
+	queryMethod    = "QUERY"
+	queryMediaType = "text/plain"
+	queryJSON      = "application/json"
+	queryNDJSON    = bulkMediaType
+	maxQueryBody   = 64 << 10
+	maxScanDocs    = 10_000
+	maxScanBytes   = 64 << 20
+	maxQueryBytes  = 8 << 20
 )
 
 var (
