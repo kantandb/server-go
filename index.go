@@ -624,20 +624,7 @@ func (s *store) queryRangePage(ctx context.Context, database, index string, op c
 		return indexPage{}, errInvalidQueryCursor
 	}
 
-	typePrefix := indexTypePrefix(database, index, encoded[0])
-	options := pebble.IterOptions{LowerBound: typePrefix, UpperBound: prefixEnd(typePrefix)}
-	boundary := indexValuePrefix(database, index, encoded)
-	switch op {
-	case cmpLT:
-		options.UpperBound = boundary
-	case cmpLE:
-		options.UpperBound = prefixEnd(boundary)
-	case cmpGT:
-		options.LowerBound = prefixEnd(boundary)
-	case cmpGE:
-		options.LowerBound = boundary
-	}
-
+	options, typePrefix := indexBounds(database, index, op, encoded)
 	snapshot := s.db.NewSnapshot()
 	defer func() {
 		if err := snapshot.Close(); err != nil {
@@ -699,6 +686,28 @@ func (s *store) queryRangePage(ctx context.Context, database, index string, op c
 	}
 
 	return page, nil
+}
+
+func indexBounds(database, index string, op cmpOp, encoded []byte) (pebble.IterOptions, []byte) {
+	boundary := indexValuePrefix(database, index, encoded)
+	if op == cmpEq {
+		return pebble.IterOptions{LowerBound: boundary, UpperBound: prefixEnd(boundary)}, boundary
+	}
+
+	prefix := indexTypePrefix(database, index, encoded[0])
+	options := pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)}
+	switch op {
+	case cmpLT:
+		options.UpperBound = boundary
+	case cmpLE:
+		options.UpperBound = prefixEnd(boundary)
+	case cmpGT:
+		options.LowerBound = prefixEnd(boundary)
+	case cmpGE:
+		options.LowerBound = boundary
+	}
+
+	return options, prefix
 }
 
 func splitIndexEntry(prefix, key []byte) ([]byte, string, bool) {

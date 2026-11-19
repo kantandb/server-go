@@ -86,8 +86,9 @@ A query scans the matching index-key range, extracts each document ID, and check
 ## jq queries
 
 `QUERY` reads one Pebble snapshot in document-ID order. It decrypts and decodes
-each document body as jq needs it. Queries do not scan secondary indexes or
-use cursors.
+each document body as jq needs it. For supported filters, it scans a secondary
+index and reads only the candidate documents. See [jq queries](query-language.md#secondary-indexes)
+for supported filters and comparison limits. Queries do not use cursors.
 
 ## Secondary-index range scans
 

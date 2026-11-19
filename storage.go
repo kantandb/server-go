@@ -293,7 +293,13 @@ func (s *store) createDocWithID(database, id string, json []byte) (rev revision,
 	return rev, nil
 }
 
-func (s *store) scanDocs(database string, scan func(func(context.Context) ([]byte, error)) error) (scanErr error) {
+func (s *store) scanDocs(database string, scan func(func(context.Context) ([]byte, error)) error) error {
+	return s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, databaseKey []byte) error {
+		return scanDocSnapshot(snapshot, database, databaseKey, scan)
+	})
+}
+
+func (s *store) withDocSnapshot(database string, use func(*pebble.Snapshot, []byte) error) (scanErr error) {
 	dbMu := s.dbLock(database)
 	dbMu.RLock()
 	defer dbMu.RUnlock()
@@ -311,6 +317,10 @@ func (s *store) scanDocs(database string, scan func(func(context.Context) ([]byt
 		}
 	}()
 
+	return use(snapshot, databaseKey)
+}
+
+func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []byte, scan func(func(context.Context) ([]byte, error)) error) (scanErr error) {
 	prefix := docsPrefix(database)
 	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
