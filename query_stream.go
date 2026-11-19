@@ -6,7 +6,10 @@ import (
 	"time"
 )
 
-const queryStatus = "Query-Status"
+const (
+	queryStatus     = "Query-Status"
+	queryBufferSize = 32 << 10
+)
 
 func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database string, program []byte) {
 	controller := http.NewResponseController(w)
@@ -27,7 +30,7 @@ func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database strin
 		}
 	}()
 
-	emit := func(value []byte) error {
+	write := func(chunk []byte) error {
 		// Bound stalled writes without limiting the duration of a full scan.
 		deadlineErr := controller.SetWriteDeadline(time.Now().Add(queryTimeout))
 		if deadlineErr != nil && !errors.Is(deadlineErr, http.ErrNotSupported) {
@@ -36,7 +39,7 @@ func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database strin
 		if !started {
 			start()
 		}
-		if _, err := w.Write(append(value, '\n')); err != nil {
+		if _, err := w.Write(chunk); err != nil {
 			return err
 		}
 		if err := controller.Flush(); err != nil {
@@ -49,7 +52,45 @@ func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database strin
 		return nil
 	}
 
-	if err := a.store.runQuery(r.Context(), database, program, true, emit); err != nil {
+	var pending []byte
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		chunk := pending
+		pending = pending[:0]
+
+		return write(chunk)
+	}
+	emit := func(value []byte) error {
+		// Send the first line immediately. Keep later batches bounded.
+		if !started || len(value) >= queryBufferSize {
+			if err := flush(); err != nil {
+				return err
+			}
+
+			return write(append(value, '\n'))
+		}
+		if len(pending)+len(value)+1 > queryBufferSize {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		if pending == nil {
+			pending = make([]byte, 0, queryBufferSize)
+		}
+		pending = append(pending, value...)
+		pending = append(pending, '\n')
+
+		return nil
+	}
+
+	err := a.store.runQuery(r.Context(), database, program, true, emit)
+	// Keep values emitted before a query error.
+	if flushErr := flush(); flushErr != nil {
+		err = errors.Join(err, flushErr)
+	}
+	if err != nil {
 		if !started {
 			a.failQuery(w, r, err)
 		} else {

@@ -66,7 +66,7 @@ func TestJQAcceptHTTP(t *testing.T) {
 		{"application/*", "1", queryJSON, "[1]", "", 200},
 		{"text/html", ".", queryJSON, `{"error":{"code":"not_acceptable","message":"Accept must allow application/json or application/x-ndjson"}}`, "", 406},
 		{queryNDJSON, `error("test")`, queryJSON, `{"error":{"code":"query_runtime","message":"Query execution failed"}}`, "", 400},
-		{queryNDJSON, `1, error("test")`, queryNDJSON, "1\n", "error", 200},
+		{queryNDJSON, `1, 2, error("test")`, queryNDJSON, "1\n2\n", "error", 200},
 	}
 	for _, tt := range tests {
 		req, err := http.NewRequest(queryMethod, server.URL+"/db/users", strings.NewReader(tt.program))
@@ -130,9 +130,10 @@ func TestNDJSONExceedsBuffer(t *testing.T) {
 	checkResponse(t, sendRequest(t, server, http.MethodPost, "/db", `{"name":"users"}`, "application/json"), http.StatusCreated, `{"name":"users"}`)
 	postQueryDoc(t, server, `{}`)
 
-	res := sendNDJSONQuery(t, server, "/db/users", `range(80) | "x" * 131072`)
+	res := sendNDJSONQuery(t, server, "/db/users", `0, (range(80) | 1, "x" * 131072), 2`)
 	body := readResponse(t, res)
-	if res.StatusCode != http.StatusOK || len(body) <= maxQueryBytes || strings.Count(body, "\n") != 80 || res.Trailer.Get(queryStatus) != "ok" {
+	want := "0\n" + strings.Repeat("1\n\""+strings.Repeat("x", 131072)+"\"\n", 80) + "2\n"
+	if res.StatusCode != http.StatusOK || body != want || res.Trailer.Get(queryStatus) != "ok" {
 		t.Fatalf("status = %d, bytes = %d, trailer = %v", res.StatusCode, len(body), res.Trailer)
 	}
 }
