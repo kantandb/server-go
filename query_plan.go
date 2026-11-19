@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/pebble"
@@ -25,6 +26,8 @@ type indexScan struct {
 	upper   []byte
 	prefix  bool
 	match   func(context.Context, string) (bool, bool)
+	integer json.Number
+	probe   *rangeProbe
 }
 
 func planQuery(query *gojq.Query) queryPlan {
@@ -61,7 +64,12 @@ func planLimitedQuery(q *gojq.Query) queryPlan {
 		return nil
 	}
 
-	return planSelect(ungroup(generator.Right))
+	plan := planSelect(ungroup(generator.Right))
+	if n, err := strconv.Atoi(count.Number); err == nil && len(plan) == 1 && n > 0 && n <= maxRangeProbeLimit {
+		plan[0].probe = planRangeProbe(plan[0], n)
+	}
+
+	return plan
 }
 
 func queryCall(q *gojq.Query, name string, argc int) *gojq.Func {
@@ -164,7 +172,9 @@ func planLiteral(path string, op cmpOp, q *gojq.Query) (indexScan, bool) {
 		return indexScan{}, false
 	}
 
-	return indexScan{path: path, op: op, encoded: encoded}, true
+	number, _ := value.(json.Number)
+
+	return indexScan{path: path, op: op, encoded: encoded, integer: number}, true
 }
 
 func planBetween(left, right *gojq.Query) queryPlan {
@@ -360,6 +370,12 @@ func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, 
 			names := planIndexNames(plan, defs)
 			if names == nil {
 				return scanDocSnapshot(snapshot, database, databaseKey, scan)
+			}
+			if len(plan) == 1 && plan[0].probe != nil {
+				used, err := scanDenseRange(ctx, snapshot, database, databaseKey, plan[0].probe, scan)
+				if used || err != nil {
+					return err
+				}
 			}
 			merged, err := scanMerged(ctx, snapshot, database, databaseKey, plan, names, scan)
 			if err != nil || merged {

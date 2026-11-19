@@ -9,7 +9,7 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-const maxMergeLists = 32
+const maxMergeLists = 128
 
 type indexList struct {
 	iter   *pebble.Iterator

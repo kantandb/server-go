@@ -33,11 +33,13 @@ It also supports these predicates on top-level fields:
 - `.name | endswith("e")`, `.name | contains("ar")`, and `.name | test("^A.*e$")` scan the string entries on `/name`. KantanDB tests each indexed value before fetching the document.
 
 KantanDB removes duplicate candidates and runs the original jq program in document-ID order.
-For up to 32 lists of IDs grouped by indexed value, it can merge the lists as jq requests documents.
+It can merge up to 128 lists of IDs grouped by indexed value as jq requests documents.
 This lets jq stop without reading the remaining IDs.
 
 A query such as `limit(10; (., inputs) | (select(.category >= 3) | .name)), halt` can use the same index as its `select` filter.
 The limit applies to outputs, and `halt` ends the scan after the limit.
+For simple integer ranges with a small limit, KantanDB first checks a short prefix in document-ID order.
+If the prefix contains enough matches, KantanDB can skip the index.
 Other uses of `input` or `inputs` still use a full document scan.
 
 If the merge does not apply, KantanDB collects and sorts the candidate IDs before running jq.
