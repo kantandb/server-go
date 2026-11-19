@@ -58,10 +58,6 @@ The server sends the first NDJSON line immediately and groups later lines into b
 
 ## Limits
 
-The program can contain up to 64 KiB of source, subject to the server request limit. JSON mode allows up to 10,000 input documents, 64 MiB of input, 8 MiB of output, and five seconds for the query. NDJSON has no total count or byte limit, but each jq result can contain at most 64 MiB. Each document evaluation and write has a five-second deadline.
+The program can contain up to 64 KiB of source, subject to the server request limit. JSON mode allows up to 10,000 input documents, 64 MiB of input, 8 MiB of output, and five seconds for the query. NDJSON has no total count or byte limit. It has a five-second deadline for each document evaluation and each write.
 
-Each jq query runs in a separate process. A memory monitor stops the process when it measures more than 128 MiB of Go memory. Linux also limits how much address space the process can allocate. The monitor can miss short spikes, and the limit does not cover all queries combined.
-
-If the worker exceeds its memory limit before streaming starts, KantanDB returns `503` with `query_limit`. If the stream already started, KantanDB sets `Query-Status: error`. If a query uses `[., inputs]`, consider processing documents one at a time instead.
-
-Restrict QUERY to trusted clients. KantanDB uses [gojq](https://github.com/itchyny/gojq#difference-to-jq) and does not expose local modules or environment variables. QUERY does not accept URI query parameters or return cursors.
+Restrict QUERY to trusted clients. Deadlines do not cap allocations. For example, `[., inputs]` collects all remaining documents in memory. KantanDB uses [gojq](https://github.com/itchyny/gojq#difference-to-jq) and does not expose local modules or environment variables. QUERY does not accept URI query parameters or return cursors.

@@ -450,8 +450,6 @@ func (a *api) failQuery(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, "database_not_found", "Database does not exist")
 	case errors.Is(err, context.DeadlineExceeded):
 		writeError(w, http.StatusServiceUnavailable, "query_timeout", "Query exceeded the execution limit")
-	case errors.Is(err, errQueryMemory):
-		writeError(w, http.StatusServiceUnavailable, "query_limit", "Query exceeded its memory limit")
 	case errors.Is(err, errQueryLimit):
 		writeError(w, http.StatusServiceUnavailable, "query_limit", "Query exceeded the evaluation limit")
 	case errors.Is(err, context.Canceled):
