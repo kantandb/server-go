@@ -15,6 +15,10 @@ KantanDB runs the program on each document body, like `jq` without `-s`. It read
 
 By default, KantanDB buffers all jq outputs in one JSON array. `Accept: application/x-ndjson` streams one compact JSON value per line. An array from jq stays on one line. If jq emits no values, JSON returns `[]` and NDJSON returns an empty body. If `Accept` excludes both formats, KantanDB returns `406 Not Acceptable`.
 
+## Direct reads
+
+For `.` and a single top-level field such as `.category`, KantanDB sends the stored JSON without running jq. A missing field returns `null`. Direct reads preserve numbers as written in storage. Wrap the query in parentheses, such as `(.category)`, to run it through jq.
+
 ## Secondary indexes
 
 A query such as `select(.salary > 100000) | .name` can use an index on `/salary`.

@@ -54,19 +54,11 @@ func (in *queryInput) Next() (any, bool) {
 }
 
 func (in *queryInput) next() (any, error) {
-	body, err := in.read(in.ctx)
+	body, err := in.readBody(in.ctx)
 	if err != nil || body == nil {
 		return nil, err
 	}
 	defer clear(body)
-
-	if in.limit {
-		if in.docs == maxScanDocs || len(body) > maxScanBytes-in.bytes {
-			return nil, errQueryLimit
-		}
-		in.docs++
-		in.bytes += len(body)
-	}
 
 	value, err := in.decoder.decode(body, true)
 	if err != nil {
@@ -76,6 +68,24 @@ func (in *queryInput) next() (any, error) {
 	return value, nil
 }
 
+func (in *queryInput) readBody(ctx context.Context) ([]byte, error) {
+	body, err := in.read(ctx)
+	if err != nil || body == nil {
+		return nil, err
+	}
+	if in.limit {
+		if in.docs == maxScanDocs || len(body) > maxScanBytes-in.bytes {
+			clear(body)
+
+			return nil, errQueryLimit
+		}
+		in.docs++
+		in.bytes += len(body)
+	}
+
+	return body, nil
+}
+
 func (s *store) runQuery(ctx context.Context, database string, program []byte, stream bool, emit func([]byte) error) error {
 	if !utf8.Valid(program) || len(bytes.TrimSpace(program)) == 0 {
 		return errInvalidQuery
@@ -83,6 +93,10 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 	query, err := gojq.Parse(string(program))
 	if err != nil {
 		return fmt.Errorf("%w: %w", errInvalidQuery, err)
+	}
+
+	if direct := planDirect(query); direct != nil {
+		return s.runDirect(ctx, direct, database, stream, emit)
 	}
 
 	plan := planQuery(query)
