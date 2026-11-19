@@ -91,14 +91,9 @@ func validatePointer(path string) error {
 }
 
 func indexValues(document []byte, defs []indexDef) (map[string][]byte, error) {
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	decoder.UseNumber()
-
-	var root map[string]any
-	if err := decoder.Decode(&root); err != nil {
-		return nil, fmt.Errorf("decoding indexed document: %w", err)
-	}
-	if err := ensureJSONEnd(decoder); err != nil {
+	var decoder objectDecoder
+	root, err := decoder.decode(document, false)
+	if err != nil {
 		return nil, fmt.Errorf("decoding indexed document: %w", err)
 	}
 

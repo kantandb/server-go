@@ -61,6 +61,7 @@ func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64,
 	var documents [][]byte
 	var line []byte
 	var total int64
+	var decoder objectDecoder
 	lineNumber := 1
 
 	for {
@@ -100,7 +101,7 @@ func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64,
 			return nil, &bulkLineError{line: lineNumber, err: errBulkLimit}
 		}
 
-		document, validateErr := validateDoc(line, maxLine)
+		document, validateErr := decoder.validate(line, maxLine)
 		if validateErr != nil {
 			return nil, &bulkLineError{line: lineNumber, err: validateErr}
 		}

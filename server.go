@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -15,6 +14,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"github.com/valyala/fastjson"
 )
 
 type api struct {
@@ -879,6 +881,21 @@ func validDocPath(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func decodeDBRequest(body []byte) (dbRequest, error) {
+	var parser objectDecoder
+	if utf8.Valid(body) {
+		node := parser.parse(body, false)
+		if node != nil && node.Type() == fastjson.TypeObject {
+			duplicate := false
+			fields := jsonObject(node, &duplicate)
+			if !duplicate {
+				if request, ok := dbRequestFrom(fields); ok {
+					return request, nil
+				}
+			}
+		}
+	}
+
+	// Preserve typed decoding for case-insensitive names, duplicates, and errors.
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 
@@ -887,12 +904,7 @@ func decodeDBRequest(body []byte) (dbRequest, error) {
 		return dbRequest{}, err
 	}
 
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return dbRequest{}, errors.New("multiple JSON values")
-		}
-
+	if err := jsonEnd(decoder); err != nil {
 		return dbRequest{}, err
 	}
 
@@ -907,6 +919,39 @@ func decodeDBRequest(body []byte) (dbRequest, error) {
 	}
 
 	return request, nil
+}
+
+func dbRequestFrom(fields map[string]any) (dbRequest, bool) {
+	name, ok := fields["name"].(string)
+	if !ok {
+		return dbRequest{}, false
+	}
+	request := dbRequest{Name: name}
+	raw, hasIndices := fields["indices"]
+	if !hasIndices {
+		return request, len(fields) == 1
+	}
+	items, ok := raw.([]any)
+	if !ok || len(fields) != 2 {
+		return dbRequest{}, false
+	}
+
+	indices := make([]indexRequest, len(items))
+	for i, item := range items {
+		index, ok := item.(map[string]any)
+		if !ok || len(index) != 2 {
+			return dbRequest{}, false
+		}
+		name, nameOK := index["name"].(string)
+		path, pathOK := index["path"].(string)
+		if !nameOK || !pathOK {
+			return dbRequest{}, false
+		}
+		indices[i] = indexRequest{Name: name, Path: path}
+	}
+	request.Indices = &indices
+
+	return request, true
 }
 
 func isJSON(value string) bool {

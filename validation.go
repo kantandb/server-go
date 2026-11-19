@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -81,6 +80,12 @@ func readBody(reader io.Reader, maxBytes int64) ([]byte, error) {
 }
 
 func validateDoc(body []byte, maxBytes int64) ([]byte, error) {
+	var decoder objectDecoder
+
+	return decoder.validate(body, maxBytes)
+}
+
+func (d *objectDecoder) validate(body []byte, maxBytes int64) ([]byte, error) {
 	if int64(len(body)) > maxBytes {
 		return nil, errBodyTooLarge
 	}
@@ -88,18 +93,9 @@ func validateDoc(body []byte, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: invalid UTF-8", errInvalidDoc)
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := d.decode(body, false)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errInvalidDoc, err)
-	}
-	if _, ok := value.(map[string]any); !ok {
-		return nil, fmt.Errorf("%w: value must be an object", errInvalidDoc)
-	}
-	if err := ensureJSONEnd(decoder); err != nil {
-		return nil, err
 	}
 
 	canonical, err := json.Marshal(value)
@@ -111,19 +107,6 @@ func validateDoc(body []byte, maxBytes int64) ([]byte, error) {
 	}
 
 	return canonical, nil
-}
-
-func ensureJSONEnd(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return fmt.Errorf("%w: multiple JSON values", errInvalidDoc)
-		}
-
-		return fmt.Errorf("%w: %v", errInvalidDoc, err)
-	}
-
-	return nil
 }
 
 func formatETag(rev revision) string {

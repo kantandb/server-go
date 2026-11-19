@@ -7,6 +7,7 @@ require (
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/itchyny/gojq v0.12.20
 	github.com/klauspost/compress v1.17.6
+	github.com/valyala/fastjson v1.6.10
 	golang.org/x/crypto v0.48.0
 )
 

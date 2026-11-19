@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"unicode/utf8"
@@ -30,13 +29,14 @@ var (
 )
 
 type queryInput struct {
-	ctx   context.Context
-	read  func(context.Context) ([]byte, error)
-	docs  int
-	bytes int
-	limit bool
-	done  bool
-	err   error
+	ctx     context.Context
+	read    func(context.Context) ([]byte, error)
+	docs    int
+	bytes   int
+	limit   bool
+	done    bool
+	err     error
+	decoder objectDecoder
 }
 
 // Next shares the scan between the main loop and jq's input and inputs.
@@ -69,10 +69,8 @@ func (in *queryInput) next() (any, error) {
 		in.bytes += len(body)
 	}
 
-	var value map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil || value == nil {
+	value, err := in.decoder.decode(body, true)
+	if err != nil {
 		return nil, fmt.Errorf("%w: invalid document JSON", errCorruptData)
 	}
 
