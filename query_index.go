@@ -10,7 +10,7 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan queryPlan, names map[string]string, scan func(func(context.Context) ([]byte, error)) error) (scanErr error) {
+func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan queryPlan, names map[string]string, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
 	var iter *pebble.Iterator
 	closeIter := func() error {
 		if iter == nil {
@@ -37,7 +37,7 @@ func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan 
 	}
 	var part indexScan
 	var prefix []byte
-	return scan(func(ctx context.Context) ([]byte, error) {
+	return scan(func(ctx context.Context) (*queryDocument, error) {
 		for {
 			if err := ctx.Err(); err != nil {
 				return nil, err

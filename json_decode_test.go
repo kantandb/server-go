@@ -56,7 +56,7 @@ func TestDeepDocumentQuery(t *testing.T) {
 	postQueryDoc(t, server, body)
 
 	res = sendNDJSONQuery(t, server, "/db/users", ".x"+strings.Repeat("[0]", levels))
-	checkResponse(t, res, http.StatusOK, "9007199254740993\n")
+	checkQueryResponse(t, res, http.StatusOK, "9007199254740993\n")
 	if got := res.Trailer.Get(queryStatus); got != "ok" {
 		t.Fatalf("trailer = %q, want ok", got)
 	}

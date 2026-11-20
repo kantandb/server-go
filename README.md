@@ -91,11 +91,12 @@ xh DELETE localhost:8080/db/example
 ### jq queries
 
 Send a raw jq program as `text/plain`. KantanDB runs it on each document.
-By default, the response wraps all jq outputs in a JSON array. Set
-`Accept: application/x-ndjson` to stream one jq output per line. A final
+Each result is `{"id": ID, "rev": ETAG, "doc": OUTPUT}`. The revision matches
+the source document's ETag. By default, results form a JSON array. Set
+`Accept: application/x-ndjson` to stream one result per line. A final
 `Query-Status: ok` trailer confirms the stream finished.
 
-Queries do not return IDs, revisions, or cursors. They do not use indexes.
+Queries do not return cursors.
 Restrict access to trusted clients. See the [query guide](docs/query-language.md)
 for limits and examples.
 
@@ -103,6 +104,8 @@ for limits and examples.
 
 `QUERY` with `.` exports documents as NDJSON when you request that format.
 Send `Content-Type: application/x-ndjson` to `POST /db/{database}` to import a batch.
+Each line accepts a raw document or an exact wrapper with string `id` and `rev` fields and an object `doc`.
+Imports discard wrapper IDs and revisions and store only `doc`.
 KantanDB assigns new UUIDv7 IDs and revisions and updates the documents and indexes in one commit.
 The batch returns `200 OK`, even for one line. A JSON object sent as
 `application/json` still returns `201 Created`.
@@ -111,6 +114,6 @@ Defaults allow 1 MiB per document, 64 MiB and 1,000 documents per import, a
 128 MiB Pebble batch, 30 seconds, and one bulk request at a time. Configure them
 with the `-bulk-*` flags shown by `kantan -help`.
 
-Bulk transfer preserves document values only. It omits database and index
-definitions, IDs, revisions, ETags, and encryption keys, so it is not backup and
+Bulk transfer preserves document values only. It does not restore IDs or revisions
+or include database and index definitions or encryption keys, so it is not backup and
 restore.

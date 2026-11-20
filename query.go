@@ -29,13 +29,14 @@ var (
 
 type queryInput struct {
 	ctx     context.Context
-	read    func(context.Context) ([]byte, error)
+	read    func(context.Context) (*queryDocument, error)
 	docs    int
 	bytes   int
 	limit   bool
 	done    bool
 	err     error
 	decoder objectDecoder
+	current *queryDocument
 }
 
 // Next shares the scan between the main loop and jq's input and inputs.
@@ -58,9 +59,9 @@ func (in *queryInput) next() (any, error) {
 	if err != nil || body == nil {
 		return nil, err
 	}
-	defer clear(body)
+	defer clear(body.json)
 
-	value, err := in.decoder.decode(body, true)
+	value, err := in.decoder.decode(body.json, true)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid document JSON", errCorruptData)
 	}
@@ -68,20 +69,22 @@ func (in *queryInput) next() (any, error) {
 	return value, nil
 }
 
-func (in *queryInput) readBody(ctx context.Context) ([]byte, error) {
+func (in *queryInput) readBody(ctx context.Context) (*queryDocument, error) {
 	body, err := in.read(ctx)
 	if err != nil || body == nil {
 		return nil, err
 	}
 	if in.limit {
-		if in.docs == maxScanDocs || len(body) > maxScanBytes-in.bytes {
-			clear(body)
+		if in.docs == maxScanDocs || len(body.json) > maxScanBytes-in.bytes {
+			clear(body.json)
 
 			return nil, errQueryLimit
 		}
 		in.docs++
-		in.bytes += len(body)
+		in.bytes += len(body.json)
 	}
+
+	in.current = body
 
 	return body, nil
 }
@@ -116,7 +119,7 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 		return fmt.Errorf("%w: %w", errInvalidQuery, err)
 	}
 
-	return s.scanQuery(database, plan, func(read func(context.Context) ([]byte, error)) error {
+	return s.scanQuery(database, plan, func(read func(context.Context) (*queryDocument, error)) error {
 		input.read = read
 		for {
 			done, err := evalQueryDoc(ctx, input, code, stream, emit)
@@ -144,6 +147,8 @@ func runQueryDoc(input *queryInput, code *gojq.Code, emit func([]byte) error) (b
 		return true, input.err
 	}
 
+	// Keep the outer document's metadata when jq consumes inputs.
+	source := input.current
 	results := code.RunWithContext(input.ctx, doc)
 	for {
 		value, ok := results.Next()
@@ -170,7 +175,7 @@ func runQueryDoc(input *queryInput, code *gojq.Code, emit func([]byte) error) (b
 		if err != nil {
 			return false, fmt.Errorf("encoding jq output: %w", err)
 		}
-		if err := emit(encoded); err != nil {
+		if err := emit(source.wrap(encoded)); err != nil {
 			return false, err
 		}
 	}

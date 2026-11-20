@@ -50,5 +50,5 @@ func TestQueryThroughReverseProxy(t *testing.T) {
 	}
 
 	res = sendRequest(t, server, queryMethod, "/db/users", `select(.active)`, "text/plain")
-	checkResponse(t, res, http.StatusOK, `[{"active":true}]`)
+	checkQueryResponse(t, res, http.StatusOK, `[{"active":true}]`)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -105,6 +106,10 @@ func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64,
 		if validateErr != nil {
 			return nil, &bulkLineError{line: lineNumber, err: validateErr}
 		}
+		document, validateErr = unwrapImport(document, &decoder, maxLine)
+		if validateErr != nil {
+			return nil, &bulkLineError{line: lineNumber, err: validateErr}
+		}
 		documents = append(documents, document)
 		line = nil
 		lineNumber++
@@ -119,6 +124,23 @@ func readBulkCtx(ctx context.Context, reader io.Reader, maxLine, maxBytes int64,
 	}
 
 	return documents, nil
+}
+
+// Only the exact export shape is unwrapped; other objects remain documents.
+func unwrapImport(body []byte, decoder *objectDecoder, maxBytes int64) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("decoding import document: %w", err)
+	}
+	var id, rev string
+	if len(fields) != 3 || fields["doc"] == nil ||
+		len(fields["id"]) == 0 || fields["id"][0] != '"' ||
+		len(fields["rev"]) == 0 || fields["rev"][0] != '"' ||
+		json.Unmarshal(fields["id"], &id) != nil || json.Unmarshal(fields["rev"], &rev) != nil {
+		return body, nil
+	}
+
+	return decoder.validate(fields["doc"], maxBytes)
 }
 
 type contextReader struct {

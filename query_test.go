@@ -29,7 +29,9 @@ func TestQueryInputLimits(t *testing.T) {
 	for _, limit := range []bool{true, false} {
 		input := &queryInput{
 			ctx: t.Context(), docs: maxScanDocs, bytes: maxScanBytes, limit: limit,
-			read: func(context.Context) ([]byte, error) { return []byte(`{"age":25}`), nil },
+			read: func(context.Context) (*queryDocument, error) {
+				return &queryDocument{storedDoc: storedDoc{json: []byte(`{"age":25}`)}}, nil
+			},
 		}
 		value, ok := input.Next()
 		if !ok || limit && !errors.Is(input.err, errQueryLimit) || !limit && input.err != nil {

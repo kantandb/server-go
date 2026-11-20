@@ -36,8 +36,8 @@ func (s *store) runDirect(ctx context.Context, plan *directPlan, database string
 	return s.scanDocs(database, directScan(plan, stream, ctx, emit))
 }
 
-func directScan(plan *directPlan, stream bool, ctx context.Context, emit func([]byte) error) func(func(context.Context) ([]byte, error)) error {
-	return func(read func(context.Context) ([]byte, error)) error {
+func directScan(plan *directPlan, stream bool, ctx context.Context, emit func([]byte) error) func(func(context.Context) (*queryDocument, error)) error {
+	return func(read func(context.Context) (*queryDocument, error)) error {
 		input := queryInput{read: read, limit: !stream}
 		for {
 			body, err := input.readBody(ctx)
@@ -45,7 +45,7 @@ func directScan(plan *directPlan, stream bool, ctx context.Context, emit func([]
 				return err
 			}
 			err = plan.emit(body, emit)
-			clear(body)
+			clear(body.json)
 			if err != nil {
 				return err
 			}
@@ -53,9 +53,10 @@ func directScan(plan *directPlan, stream bool, ctx context.Context, emit func([]
 	}
 }
 
-func (plan *directPlan) emit(body []byte, emit func([]byte) error) error {
+func (plan *directPlan) emit(doc *queryDocument, emit func([]byte) error) error {
+	body := doc.json
 	if !plan.project {
-		return emit(body)
+		return emit(doc.wrap(body))
 	}
 
 	value, err := storedField(body, plan.field)
@@ -63,7 +64,7 @@ func (plan *directPlan) emit(body []byte, emit func([]byte) error) error {
 		return err
 	}
 
-	return emit(value)
+	return emit(doc.wrap(value))
 }
 
 // Stored objects are compact and have unique keys. Skip unselected values without decoding them.

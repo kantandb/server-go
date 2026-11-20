@@ -47,7 +47,7 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 		t.Errorf("Query-Status = %q, want ok", got)
 	}
 	want := "{\"id\":\"ordinary\",\"name\":\"first\"}\n{\"name\":\"second\"}\n"
-	if body != want {
+	if queryValues(t, body, true) != want {
 		t.Fatalf("export body = %q, want %q", body, want)
 	}
 
@@ -64,6 +64,26 @@ func TestBulkRoundTripHTTP(t *testing.T) {
 	}
 	if len(ids) != 2 {
 		t.Fatalf("import stored %d documents, want 2", len(ids))
+	}
+	for _, id := range ids {
+		if id == "01950000-0000-7000-8000-000000000001" || id == "01950000-0000-7000-8000-000000000002" {
+			t.Fatalf("import reused source ID %s", id)
+		}
+		doc, err := target.getDoc("target", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceID := "01950000-0000-7000-8000-000000000002"
+		if string(doc.json) == `{"id":"ordinary","name":"first"}` {
+			sourceID = "01950000-0000-7000-8000-000000000001"
+		}
+		original, err := source.getDoc("source", sourceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc.revision == original.revision {
+			t.Fatal("import reused source revision")
+		}
 	}
 	assertQuery(t, target, "target", "name", "first", idsForValue(t, target, ids, `{"id":"ordinary","name":"first"}`))
 }

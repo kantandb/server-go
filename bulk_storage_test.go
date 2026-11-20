@@ -12,14 +12,14 @@ import (
 )
 
 func exportDocsForTest(ctx context.Context, s *store, database string, yield func([]byte) error) error {
-	return s.scanDocs(database, func(next func(context.Context) ([]byte, error)) error {
+	return s.scanDocs(database, func(next func(context.Context) (*queryDocument, error)) error {
 		for {
 			doc, err := next(ctx)
 			if err != nil || doc == nil {
 				return err
 			}
-			err = yield(doc)
-			clear(doc)
+			err = yield(doc.json)
+			clear(doc.json)
 			if err != nil {
 				return err
 			}

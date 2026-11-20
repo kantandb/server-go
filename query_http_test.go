@@ -15,7 +15,7 @@ func TestJQHTTP(t *testing.T) {
 
 	server := newTestServer(t, defaultMaxBodyBytes)
 	checkResponse(t, sendRequest(t, server, http.MethodPost, "/db", `{"name":"users"}`, "application/json"), http.StatusCreated, `{"name":"users"}`)
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", ".", "text/plain"), http.StatusOK, "[]")
+	checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", ".", "text/plain"), http.StatusOK, "[]")
 	createQueryDoc(t, server, "/db/users", `{"age":25,"name":"Alice"}`)
 	createQueryDoc(t, server, "/db/users", `{"age":17,"name":"Bob"}`)
 
@@ -32,7 +32,7 @@ func TestJQHTTP(t *testing.T) {
 		if res.Header.Get("Accept-Query") != "text/plain" || res.Header.Get("Cache-Control") != "no-store" {
 			t.Errorf("query headers = %v", res.Header)
 		}
-		checkResponse(t, res, http.StatusOK, tt.want)
+		checkQueryResponse(t, res, http.StatusOK, tt.want)
 	}
 
 	for _, method := range []string{http.MethodGet, http.MethodOptions} {
@@ -85,7 +85,7 @@ func TestJQAcceptHTTP(t *testing.T) {
 		if got := res.Header.Get("Vary"); got != "Accept" {
 			t.Errorf("Vary = %q, want Accept", got)
 		}
-		checkResponse(t, res, tt.status, tt.body)
+		checkQueryResponse(t, res, tt.status, tt.body)
 		if got := res.Trailer.Get(queryStatus); got != tt.trailer {
 			t.Errorf("Query-Status for %q = %q, want %q", tt.program, got, tt.trailer)
 		}
@@ -118,7 +118,7 @@ func TestQueryStreamsConcurrently(t *testing.T) {
 	}()
 
 	line, err := bufio.NewReader(res.Body).ReadString('\n')
-	if res.StatusCode != http.StatusOK || line != "1\n" || err != nil {
+	if res.StatusCode != http.StatusOK || queryValues(t, line, true) != "1\n" || err != nil {
 		t.Fatalf("status = %d, first line = %q, err = %v", res.StatusCode, line, err)
 	}
 
@@ -133,7 +133,7 @@ func TestQueryStreamsConcurrently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkResponse(t, second, http.StatusOK, `[2]`)
+	checkQueryResponse(t, second, http.StatusOK, `[2]`)
 }
 
 func TestNDJSONExceedsBuffer(t *testing.T) {
@@ -144,7 +144,7 @@ func TestNDJSONExceedsBuffer(t *testing.T) {
 	postQueryDoc(t, server, `{}`)
 
 	res := sendNDJSONQuery(t, server, "/db/users", `0, (range(80) | 1, "x" * 131072), 2`)
-	body := readResponse(t, res)
+	body := queryValues(t, readResponse(t, res), true)
 	want := "0\n" + strings.Repeat("1\n\""+strings.Repeat("x", 131072)+"\"\n", 80) + "2\n"
 	if res.StatusCode != http.StatusOK || body != want || res.Trailer.Get(queryStatus) != "ok" {
 		t.Fatalf("status = %d, bytes = %d, trailer = %v", res.StatusCode, len(body), res.Trailer)

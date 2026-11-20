@@ -339,7 +339,7 @@ func indexLiteral(term *gojq.Term) any {
 	return nil
 }
 
-func (s *store) scanEquality(database string, part indexScan, scan func(func(context.Context) ([]byte, error)) error) (used bool, err error) {
+func (s *store) scanEquality(database string, part indexScan, scan func(func(context.Context) (*queryDocument, error)) error) (used bool, err error) {
 	err = s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, key []byte) error {
 		defs, err := s.indexes(database)
 		if err != nil {
@@ -358,7 +358,7 @@ func (s *store) scanEquality(database string, part indexScan, scan func(func(con
 	return used, err
 }
 
-func (s *store) scanQuery(database string, plan queryPlan, scan func(func(context.Context) ([]byte, error)) error) error {
+func (s *store) scanQuery(database string, plan queryPlan, scan func(func(context.Context) (*queryDocument, error)) error) error {
 	return s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, databaseKey []byte) error {
 		if len(plan) != 0 {
 			defs, err := s.indexes(database)
@@ -413,7 +413,7 @@ func scanBounds(database, index string, scan indexScan) (pebble.IterOptions, []b
 	return bounds, prefix
 }
 
-func readIndexedDoc(snapshot *pebble.Snapshot, databaseKey, key []byte, id string) (body []byte, readErr error) {
+func readIndexedDoc(snapshot *pebble.Snapshot, databaseKey, key []byte, id string) (doc *queryDocument, readErr error) {
 	value, closer, err := snapshot.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, fmt.Errorf("%w: index references missing document", errCorruptData)
@@ -427,10 +427,10 @@ func readIndexedDoc(snapshot *pebble.Snapshot, databaseKey, key []byte, id strin
 		}
 	}()
 
-	doc, err := openDoc(key, databaseKey, id, value)
+	stored, err := openDoc(key, databaseKey, id, value)
 	if err != nil {
 		return nil, fmt.Errorf("reading indexed document: %w", err)
 	}
 
-	return doc.json, nil
+	return &queryDocument{id: id, storedDoc: stored}, nil
 }

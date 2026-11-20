@@ -293,7 +293,7 @@ func (s *store) createDocWithID(database, id string, json []byte) (rev revision,
 	return rev, nil
 }
 
-func (s *store) scanDocs(database string, scan func(func(context.Context) ([]byte, error)) error) error {
+func (s *store) scanDocs(database string, scan func(func(context.Context) (*queryDocument, error)) error) error {
 	return s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, databaseKey []byte) error {
 		return scanDocSnapshot(snapshot, database, databaseKey, scan)
 	})
@@ -320,7 +320,7 @@ func (s *store) withDocSnapshot(database string, use func(*pebble.Snapshot, []by
 	return use(snapshot, databaseKey)
 }
 
-func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []byte, scan func(func(context.Context) ([]byte, error)) error) (scanErr error) {
+func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []byte, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
 	prefix := docsPrefix(database)
 	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
@@ -333,7 +333,7 @@ func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []b
 	}()
 
 	first := true
-	return scan(func(ctx context.Context) ([]byte, error) {
+	return scan(func(ctx context.Context) (*queryDocument, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -362,7 +362,7 @@ func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []b
 			return nil, fmt.Errorf("reading scan document: %w", err)
 		}
 
-		return doc.json, nil
+		return &queryDocument{id: id, storedDoc: doc}, nil
 	})
 }
 

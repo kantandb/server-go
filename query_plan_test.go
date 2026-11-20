@@ -132,7 +132,7 @@ func TestIndexedPredicatesHTTP(t *testing.T) {
 		{`.name | startswith("")`, `[3,1,4,2,5]`},
 	} {
 		program := "select(" + tt.predicate + ") | .id"
-		checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", program, queryMediaType), http.StatusOK, tt.want)
+		checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", program, queryMediaType), http.StatusOK, tt.want)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestIndexStringFilters(t *testing.T) {
 		{`select((.name | endswith("e")) or .name == "Anne") | .id`, `[3,1]`},
 		{`select(.name | test("^Z")) | .id`, `[]`},
 	} {
-		result, err := s.queryArray(t.Context(), "users", []byte(tt.program))
+		result, err := queryDocsForTest(t, s, tt.program)
 		if err != nil || string(result) != tt.want {
 			t.Errorf("%s = %s, %v; want %s", tt.program, result, err, tt.want)
 		}
@@ -195,7 +195,7 @@ func TestLimitedIndexScan(t *testing.T) {
 	const program = `limit(3; (., inputs) | (select(.category >= 3 or .category == 4) | .id)), halt`
 	check := func(program, want string) {
 		t.Helper()
-		got, err := s.queryArray(t.Context(), "users", []byte(program))
+		got, err := queryDocsForTest(t, s, program)
 		if err != nil || string(got) != want {
 			t.Fatalf("%s = %s, %v; want %s", program, got, err, want)
 		}
@@ -234,7 +234,7 @@ func TestWideIndexRange(t *testing.T) {
 	}
 
 	const program = `limit(3; (., inputs) | (select(.category >= 0) | .id)), halt`
-	got, err := s.queryArray(t.Context(), "users", []byte(program))
+	got, err := queryDocsForTest(t, s, program)
 	if err != nil || string(got) != `[255,254,253]` {
 		t.Fatalf("query = %s, %v; want [255,254,253]", got, err)
 	}
@@ -268,7 +268,7 @@ func TestIndexedExactEquality(t *testing.T) {
 		{`select(.mee >= 3 and .mee <= 3) | .mee`, `[3,3.0,3e0]`},
 		{`select(.mee > 3)`, `[]`},
 	} {
-		got, err := s.queryArray(t.Context(), "users", []byte(tt.program))
+		got, err := queryDocsForTest(t, s, tt.program)
 		if err != nil || string(got) != tt.want {
 			t.Errorf("%s = %s, %v; want %s", tt.program, got, err, tt.want)
 		}
@@ -292,13 +292,13 @@ func TestIndexedQueryHTTP(t *testing.T) {
 	}
 
 	const query = `select(.salary > 100000) | .name`
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", query, queryMediaType), http.StatusOK, `["Cara","Ana"]`)
+	checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", query, queryMediaType), http.StatusOK, `["Cara","Ana"]`)
 	res := sendNDJSONQuery(t, server, "/db/users", query)
-	checkResponse(t, res, http.StatusOK, "\"Cara\"\n\"Ana\"\n")
+	checkQueryResponse(t, res, http.StatusOK, "\"Cara\"\n\"Ana\"\n")
 	if got := res.Trailer.Get(queryStatus); got != "ok" {
 		t.Errorf("Query-Status = %q, want ok", got)
 	}
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", `(`+query+`)`, queryMediaType), http.StatusOK, `["Ana","Cara","Dan"]`)
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", `select(.salary == 90000) | .name`, queryMediaType), http.StatusOK, `["Ben"]`)
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", `select(.salary > 100000) | [.name, (input | .name)]`, queryMediaType), http.StatusOK, `[["Ana","Ben"],["Cara","Dan"]]`)
+	checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", `(`+query+`)`, queryMediaType), http.StatusOK, `["Ana","Cara","Dan"]`)
+	checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", `select(.salary == 90000) | .name`, queryMediaType), http.StatusOK, `["Ben"]`)
+	checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", `select(.salary > 100000) | [.name, (input | .name)]`, queryMediaType), http.StatusOK, `[["Ana","Ben"],["Cara","Dan"]]`)
 }

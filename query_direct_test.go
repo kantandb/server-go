@@ -53,9 +53,9 @@ func TestDirectQueryHTTP(t *testing.T) {
 		{`.missing`, `null`, `null`},
 		{`(.category)`, `0.10000000000000001`, `null`},
 	} {
-		checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", tc.program, queryMediaType), http.StatusOK, "["+tc.first+","+tc.second+"]")
+		checkQueryResponse(t, sendRequest(t, server, queryMethod, "/db/users", tc.program, queryMediaType), http.StatusOK, "["+tc.first+","+tc.second+"]")
 		res := sendNDJSONQuery(t, server, "/db/users", tc.program)
-		checkResponse(t, res, http.StatusOK, tc.first+"\n"+tc.second+"\n")
+		checkQueryResponse(t, res, http.StatusOK, tc.first+"\n"+tc.second+"\n")
 		if got := res.Trailer.Get(queryStatus); got != "ok" {
 			t.Errorf("Query-Status for %q = %q, want ok", tc.program, got)
 		}

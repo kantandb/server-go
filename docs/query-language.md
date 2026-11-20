@@ -13,7 +13,9 @@ curl -i -N -X QUERY http://localhost:8080/db/users \
 
 KantanDB runs the program on each document body, like `jq` without `-s`. It reads from one Pebble snapshot. Full scans read in document-ID order. Indexed queries read in index order and can return a different set of documents when you use `limit`. The input contains no server IDs or revisions. For example, `.` returns every document and `.skills[]` emits each skill separately. A program can use `input` or `inputs` to consume later documents from the same scan.
 
-By default, KantanDB buffers all jq outputs in one JSON array. `Accept: application/x-ndjson` streams one compact JSON value per line. An array from jq stays on one line. If jq emits no values, JSON returns `[]` and NDJSON returns an empty body. If `Accept` excludes both formats, KantanDB returns `406 Not Acceptable`.
+Each output has the shape `{"id": ID, "rev": ETAG, "doc": OUTPUT}`. The `id` and `rev` identify the source document. The revision is its ETag, including the quotes inside the JSON string. The `doc` field contains the full document or the jq result, including scalars, arrays, and `null`. Multiple outputs from one document share its metadata. If jq consumes `input` or `inputs`, outputs keep the metadata of the document that started that evaluation.
+
+By default, KantanDB buffers these results in one JSON array. `Accept: application/x-ndjson` streams one compact result per line. An array from jq stays inside `doc` on one line. If jq emits no values, JSON returns `[]` and NDJSON returns an empty body. If `Accept` excludes both formats, KantanDB returns `406 Not Acceptable`.
 
 ## Direct reads
 

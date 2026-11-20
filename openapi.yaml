@@ -162,6 +162,8 @@ paths:
       summary: Create one document or import a batch
       description: |
         Use application/json for one document or application/x-ndjson for a batch.
+        Batch lines accept raw objects or exact {id, rev, doc} wrappers with string
+        id and rev fields. Imports store only the object in doc and discard wrapper metadata.
         The server commits the entire batch or none of it. It assigns new IDs and
         revisions and updates the indexes. The batch defaults are 1 MiB per document,
         64 MiB total, 1,000 documents, a 128 MiB batch, 30 seconds, and one concurrent
@@ -284,7 +286,7 @@ paths:
             example: select(.age >= 18) | .name
       responses:
         "200":
-          description: The jq outputs in order, wrapped in a JSON array or encoded as one JSON value per line.
+          description: Results with source IDs, ETags, and jq outputs, as a JSON array or one wrapper per line.
           headers:
             Accept-Query:
               $ref: "#/components/headers/AcceptQuery"
@@ -294,14 +296,25 @@ paths:
             application/json:
               schema:
                 type: array
-                items: {}
-              example: ["Alice"]
+                items:
+                  type: object
+                  required: [id, rev, doc]
+                  additionalProperties: false
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    rev:
+                      type: string
+                      description: Source document ETag, including its quotes.
+                    doc: {}
+              example: [{"id":"01950000-0000-7000-8000-000000000001","rev":"\"0123456789abcdef0123456789abcdef\"","doc":"Alice"}]
             application/x-ndjson:
               schema:
                 type: string
-                description: One compact JSON value per line, with no array wrapper.
+                description: One compact {id, rev, doc} wrapper per line, with no outer array.
               example: |
-                "Alice"
+                {"id":"01950000-0000-7000-8000-000000000001","rev":"\"0123456789abcdef0123456789abcdef\"","doc":"Alice"}
         "400":
           $ref: "#/components/responses/BadRequest"
           description: The database name or program is invalid, or the program failed.
