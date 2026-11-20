@@ -332,10 +332,10 @@ func indexComparison(op gojq.Operator) (cmpOp, bool) {
 func indexLiteral(term *gojq.Term) any {
 	switch term.Type {
 	case gojq.TermTypeNumber:
-		return indexNumber(term.Number)
+		return json.Number(term.Number)
 	case gojq.TermTypeUnary:
 		if inner := term.Unary.Term; term.Unary.Op == gojq.OpSub && inner.Type == gojq.TermTypeNumber && len(inner.SuffixList) == 0 {
-			return indexNumber("-" + inner.Number)
+			return json.Number("-" + inner.Number)
 		}
 	case gojq.TermTypeString:
 		if term.Str.Queries == nil {
@@ -351,13 +351,23 @@ func indexLiteral(term *gojq.Term) any {
 	return nil
 }
 
-func indexNumber(text string) any {
-	// Bound the work of encoding an untrusted numeric literal as a rational.
-	if len(text) > 128 || strings.ContainsAny(text, "eE") {
-		return nil
-	}
+func (s *store) scanEquality(ctx context.Context, database string, part indexScan, scan func(func(context.Context) ([]byte, error)) error) (used bool, err error) {
+	err = s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, key []byte) error {
+		defs, err := s.indexes(database)
+		if err != nil {
+			return err
+		}
+		plan := queryPlan{part}
+		names := planIndexNames(plan, defs)
+		if names == nil {
+			return nil
+		}
 
-	return json.Number(text)
+		used, err = scanMerged(ctx, snapshot, database, key, plan, names, scan)
+		return err
+	})
+
+	return used, err
 }
 
 func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, scan func(func(context.Context) ([]byte, error)) error) error {

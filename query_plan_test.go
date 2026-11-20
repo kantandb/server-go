@@ -239,6 +239,41 @@ func TestLimitedIndexMergeFallback(t *testing.T) {
 	}
 }
 
+func TestIndexedExactEquality(t *testing.T) {
+	t.Parallel()
+
+	s := testStore(t)
+	if err := s.createDB("users", indexDef{name: "mee", path: "/mee"}); err != nil {
+		t.Fatal(err)
+	}
+	const integer = `{"mee":3,"decimal":1.2300}`
+	const decimal = `{"mee":3.0}`
+	const exponent = `{"mee":3e0}`
+	for id, body := range map[string]string{
+		indexTestIDA: integer,
+		indexTestIDB: decimal,
+		indexTestIDC: exponent,
+	} {
+		if _, err := s.createDocWithID("users", id, []byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct{ program, want string }{
+		{`select(.mee == 3)`, `[` + integer + `]`},
+		{`select(.mee == 3.0)`, `[` + decimal + `]`},
+		{`select(.mee == 3e0)`, `[` + exponent + `]`},
+		{`select(.mee == 3.00)`, `[]`},
+		{`select(.mee >= 3 and .mee <= 3) | .mee`, `[3,3.0,3e0]`},
+		{`select(.mee > 3)`, `[]`},
+	} {
+		got, err := s.queryArray(t.Context(), "users", []byte(tt.program))
+		if err != nil || string(got) != tt.want {
+			t.Errorf("%s = %s, %v; want %s", tt.program, got, err, tt.want)
+		}
+	}
+}
+
 func TestIndexedQueryHTTP(t *testing.T) {
 	t.Parallel()
 

@@ -32,7 +32,9 @@ It also supports these predicates on top-level fields:
 - `.name | startswith("A")` scans the string prefix on `/name`.
 - `.name | endswith("e")`, `.name | contains("ar")`, and `.name | test("^A.*e$")` scan the string entries on `/name`. KantanDB tests each indexed value before fetching the document.
 
-KantanDB removes duplicate candidates and runs the original jq program in document-ID order.
+A bare indexed filter such as `select(.category == 3)` returns the stored JSON without running jq.
+Indexed equality compares number spellings exactly: `3`, `3.0`, and `3e0` match different values.
+For other indexed queries, KantanDB removes duplicate candidates and runs the original jq program in document-ID order.
 It can merge up to 128 lists of IDs grouped by indexed value as jq requests documents.
 This lets jq stop without reading the remaining IDs.
 
@@ -46,7 +48,7 @@ If the merge does not apply, KantanDB collects and sorts the candidate IDs befor
 It uses a full document scan if no plan applies or the collector exceeds its 10,000-entry budget.
 The `endswith`, `contains`, and `test` scans can read more entries but still collect at most 10,000 unique IDs.
 
-Index bounds use the stored value type and exact numeric values, not jq comparison rules.
+Range bounds use the stored value type and exact numeric values, regardless of number spelling.
 For example, jq considers `"90000"` greater than `100000`, but the index excludes it from a numeric range.
 Decimal rounding in jq can also cause the index to miss matches.
 Indexed string tests skip missing and non-string fields, which can raise errors in a full document scan.

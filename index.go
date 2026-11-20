@@ -158,7 +158,7 @@ func encodeIndexValue(value any) ([]byte, error) {
 		}
 	case json.Number:
 		literal := string(value)
-		if literal == "" {
+		if literal == "" || len(literal) >= maxIndexValue {
 			return nil, fmt.Errorf("%w: invalid number", errInvalidIndexValue)
 		}
 		// Marshal validates JSON number syntax.
@@ -166,6 +166,12 @@ func encodeIndexValue(value any) ([]byte, error) {
 			return nil, fmt.Errorf("%w: invalid number", errInvalidIndexValue)
 		}
 
+		if i := strings.IndexAny(literal, "eE"); i >= 0 {
+			scale, err := strconv.Atoi(literal[i+1:])
+			if err != nil || scale < -maxIndexValue || scale > maxIndexValue {
+				return nil, fmt.Errorf("%w: number exponent is out of range", errInvalidIndexValue)
+			}
+		}
 		number, ok := new(big.Rat).SetString(literal)
 		if !ok {
 			return nil, fmt.Errorf("%w: invalid number", errInvalidIndexValue)
@@ -173,7 +179,9 @@ func encodeIndexValue(value any) ([]byte, error) {
 		if len(number.RatString())+1 > maxIndexValue {
 			return nil, fmt.Errorf("%w: value is too large", errInvalidIndexValue)
 		}
+		// Keep numeric order first and use the literal spelling for equality.
 		encoded = append([]byte{0x03}, encodeSortableNumber(number)...)
+		encoded = append(append(encoded, literal...), 0)
 	case string:
 		if !utf8.ValidString(value) {
 			return nil, fmt.Errorf("%w: invalid UTF-8", errInvalidIndexValue)
@@ -287,12 +295,35 @@ func validIndexValue(value []byte) bool {
 	case 0x00, 0x01, 0x02:
 		return len(value) == 1
 	case 0x03:
-		return validSortableNumber(value[1:])
+		end := sortableNumberEnd(value[1:])
+		literal := value[1+end:]
+		return end != 0 && validSortableNumber(value[1:1+end]) && len(literal) > 1 &&
+			literal[len(literal)-1] == 0 && literal[len(literal)-2] >= '0' && literal[len(literal)-2] <= '9' &&
+			(literal[0] == '-' || literal[0] >= '0' && literal[0] <= '9') && json.Valid(literal[:len(literal)-1])
 	case 0x04:
 		return validSortableString(value[1:])
 	default:
 		return false
 	}
+}
+
+func sortableNumberEnd(value []byte) int {
+	if len(value) > 0 && value[0] == 0x01 {
+		return 1
+	}
+	if len(value) < 11 || value[0] != 0x00 && value[0] != 0x02 {
+		return 0
+	}
+	terminator := byte(0)
+	if value[0] == 0x00 {
+		terminator = 0xff
+	}
+	position := bytes.IndexByte(value[9:], terminator)
+	if position < 1 {
+		return 0
+	}
+
+	return 10 + position
 }
 
 func validSortableNumber(value []byte) bool {
@@ -689,6 +720,10 @@ func (s *store) queryRangePage(ctx context.Context, database, index string, op c
 }
 
 func indexBounds(database, index string, op cmpOp, encoded []byte) (pebble.IterOptions, []byte) {
+	if op != cmpEq && encoded[0] == 0x03 {
+		// All spellings of a boundary number belong to the same range.
+		encoded = encoded[:1+sortableNumberEnd(encoded[1:])]
+	}
 	boundary := indexValuePrefix(database, index, encoded)
 	if op == cmpEq {
 		return pebble.IterOptions{LowerBound: boundary, UpperBound: prefixEnd(boundary)}, boundary
@@ -719,28 +754,15 @@ func splitIndexEntry(prefix, key []byte) ([]byte, string, bool) {
 	end := 0
 	switch prefix[len(prefix)-1] {
 	case 0x03:
-		if len(rest) == 0 {
+		end = sortableNumberEnd(rest)
+		if end == 0 {
 			return nil, "", false
 		}
-		switch rest[0] {
-		case 0x01:
-			end = 1
-		case 0x00, 0x02:
-			terminator := byte(0x00)
-			if rest[0] == 0x00 {
-				terminator = 0xff
-			}
-			if len(rest) < 11 {
-				return nil, "", false
-			}
-			position := bytes.IndexByte(rest[9:], terminator)
-			if position < 1 {
-				return nil, "", false
-			}
-			end = 9 + position + 1
-		default:
+		position := bytes.IndexByte(rest[end:], 0)
+		if position < 1 {
 			return nil, "", false
 		}
+		end += position + 1
 	case 0x04:
 		for end < len(rest)-1 {
 			if rest[end] != 0x00 {

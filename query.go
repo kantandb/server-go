@@ -100,6 +100,15 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 	}
 
 	plan := planQuery(query)
+	if selectCall := queryCall(query, "select", 1); selectCall != nil &&
+		ungroup(selectCall.Args[0]).Op == gojq.OpEq && len(plan) == 1 {
+		used, err := s.scanEquality(ctx, database, plan[0], directScan(&directPlan{}, stream, ctx, emit))
+		if used || err != nil {
+			return err
+		}
+		plan = nil
+	}
+
 	input := &queryInput{limit: !stream}
 	// No module or environment loader. Only the document scan is exposed.
 	code, err := gojq.Compile(query, gojq.WithInputIter(input))

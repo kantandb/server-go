@@ -81,7 +81,9 @@ users → email → "a@example.com" → 0195...002
 
 Index values have type tags. `null`, booleans, numbers, and strings are supported. Numbers and strings use order-preserving encodings, which lets Pebble prefix and range scans answer equality and range queries. Missing fields, objects, and arrays do not get an index entry. Types are kept separate and are not coerced.
 
-A query scans the matching index-key range, extracts each document ID, and checks that its primary record exists. Equal values are ordered by document ID; range results are ordered by encoded value and then document ID.
+Numeric keys store the sortable value followed by the original number spelling. Equality uses both parts, so `3` and `3.0` have different keys. Range bounds use only the sortable value.
+
+A query scans the matching index keys and reads their document IDs. Equality matches are ordered by document ID. Range results are ordered by encoded value and then document ID.
 
 ## jq queries
 

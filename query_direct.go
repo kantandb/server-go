@@ -33,7 +33,11 @@ func planDirect(q *gojq.Query) *directPlan {
 }
 
 func (s *store) runDirect(ctx context.Context, plan *directPlan, database string, stream bool, emit func([]byte) error) error {
-	return s.scanDocs(database, func(read func(context.Context) ([]byte, error)) error {
+	return s.scanDocs(database, directScan(plan, stream, ctx, emit))
+}
+
+func directScan(plan *directPlan, stream bool, ctx context.Context, emit func([]byte) error) func(func(context.Context) ([]byte, error)) error {
+	return func(read func(context.Context) ([]byte, error)) error {
 		input := queryInput{read: read, limit: !stream}
 		for {
 			body, err := input.readBody(ctx)
@@ -46,7 +50,7 @@ func (s *store) runDirect(ctx context.Context, plan *directPlan, database string
 				return err
 			}
 		}
-	})
+	}
 }
 
 func (plan *directPlan) emit(body []byte, emit func([]byte) error) error {

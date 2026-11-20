@@ -4,7 +4,7 @@ const (
 	storeMetaVersion byte = 1
 	dbRecordVersion  byte = 1
 	docRecordVersion byte = 1
-	indexDefVersion  byte = 1
+	indexDefVersion  byte = 2
 
 	cipherSuite1 byte = 1
 	wrappingKey1 byte = 1

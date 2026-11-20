@@ -78,8 +78,8 @@ func TestIndexValueEncoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encodeIndexValue(%q) error = %v", number, err)
 		}
-		if !bytes.Equal(got, first) {
-			t.Errorf("encodeIndexValue(%q) = %x, want %x", number, got, first)
+		if bytes.Equal(got, first) || !bytes.HasSuffix(got, append([]byte(number), 0)) {
+			t.Errorf("encodeIndexValue(%q) = %x, want distinct key with literal suffix", number, got)
 		}
 	}
 	integer, err := encodeIndexValue(1)
@@ -635,7 +635,8 @@ func TestStorePersistsIndexes(t *testing.T) {
 	if len(defs) != 1 || defs[0].name != "number" || defs[0].path != "/number" {
 		t.Errorf("indexes() = %+v, want number definition", defs)
 	}
-	assertQuery(t, store, "db", "number", json.Number("1e0"), []string{indexTestIDA})
+	assertQuery(t, store, "db", "number", json.Number("1.0"), []string{indexTestIDA})
+	assertQuery(t, store, "db", "number", json.Number("1e0"), nil)
 }
 
 func TestDeleteDBDeletesIndexes(t *testing.T) {
