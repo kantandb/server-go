@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/cockroachdb/pebble"
@@ -26,8 +23,6 @@ type indexScan struct {
 	upper   []byte
 	prefix  bool
 	match   func(context.Context, string) (bool, bool)
-	integer json.Number
-	probe   *rangeProbe
 }
 
 func planQuery(query *gojq.Query) queryPlan {
@@ -64,12 +59,7 @@ func planLimitedQuery(q *gojq.Query) queryPlan {
 		return nil
 	}
 
-	plan := planSelect(ungroup(generator.Right))
-	if n, err := strconv.Atoi(count.Number); err == nil && len(plan) == 1 && n > 0 && n <= maxRangeProbeLimit {
-		plan[0].probe = planRangeProbe(plan[0], n)
-	}
-
-	return plan
+	return planSelect(ungroup(generator.Right))
 }
 
 func queryCall(q *gojq.Query, name string, argc int) *gojq.Func {
@@ -172,9 +162,7 @@ func planLiteral(path string, op cmpOp, q *gojq.Query) (indexScan, bool) {
 		return indexScan{}, false
 	}
 
-	number, _ := value.(json.Number)
-
-	return indexScan{path: path, op: op, encoded: encoded, integer: number}, true
+	return indexScan{path: path, op: op, encoded: encoded}, true
 }
 
 func planBetween(left, right *gojq.Query) queryPlan {
@@ -351,7 +339,7 @@ func indexLiteral(term *gojq.Term) any {
 	return nil
 }
 
-func (s *store) scanEquality(ctx context.Context, database string, part indexScan, scan func(func(context.Context) ([]byte, error)) error) (used bool, err error) {
+func (s *store) scanEquality(database string, part indexScan, scan func(func(context.Context) ([]byte, error)) error) (used bool, err error) {
 	err = s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, key []byte) error {
 		defs, err := s.indexes(database)
 		if err != nil {
@@ -363,14 +351,14 @@ func (s *store) scanEquality(ctx context.Context, database string, part indexSca
 			return nil
 		}
 
-		used, err = scanMerged(ctx, snapshot, database, key, plan, names, scan)
-		return err
+		used = true
+		return scanIndexDocs(snapshot, database, key, plan, names, scan)
 	})
 
 	return used, err
 }
 
-func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, scan func(func(context.Context) ([]byte, error)) error) error {
+func (s *store) scanQuery(database string, plan queryPlan, scan func(func(context.Context) ([]byte, error)) error) error {
 	return s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, databaseKey []byte) error {
 		if len(plan) != 0 {
 			defs, err := s.indexes(database)
@@ -381,23 +369,7 @@ func (s *store) scanQuery(ctx context.Context, database string, plan queryPlan, 
 			if names == nil {
 				return scanDocSnapshot(snapshot, database, databaseKey, scan)
 			}
-			if len(plan) == 1 && plan[0].probe != nil {
-				used, err := scanDenseRange(ctx, snapshot, database, databaseKey, plan[0].probe, scan)
-				if used || err != nil {
-					return err
-				}
-			}
-			merged, err := scanMerged(ctx, snapshot, database, databaseKey, plan, names, scan)
-			if err != nil || merged {
-				return err
-			}
-			ids, indexed, err := planIDs(ctx, snapshot, database, plan, names)
-			if err != nil {
-				return err
-			}
-			if indexed {
-				return scanIndexedDocs(snapshot, database, databaseKey, ids, scan)
-			}
+			return scanIndexDocs(snapshot, database, databaseKey, plan, names, scan)
 		}
 
 		return scanDocSnapshot(snapshot, database, databaseKey, scan)
@@ -420,26 +392,6 @@ func planIndexNames(plan queryPlan, defs []indexDef) map[string]string {
 	return names
 }
 
-func planIDs(ctx context.Context, snapshot *pebble.Snapshot, database string, plan queryPlan, names map[string]string) ([]string, bool, error) {
-	ids := make(map[string]struct{})
-	remaining := maxScanDocs
-	for _, scan := range plan {
-		complete, err := collectIndexIDs(ctx, snapshot, database, names[scan.path], scan, ids, &remaining)
-		if err != nil || !complete {
-			return nil, false, err
-		}
-	}
-
-	// Merge overlapping ranges and preserve document-ID order.
-	ordered := make([]string, 0, len(ids))
-	for id := range ids {
-		ordered = append(ordered, id)
-	}
-	slices.Sort(ordered)
-
-	return ordered, true, nil
-}
-
 func scanBounds(database, index string, scan indexScan) (pebble.IterOptions, []byte) {
 	if scan.match != nil {
 		prefix := indexTypePrefix(database, index, 0x04)
@@ -459,85 +411,6 @@ func scanBounds(database, index string, scan indexScan) (pebble.IterOptions, []b
 	}
 
 	return bounds, prefix
-}
-
-func collectIndexIDs(ctx context.Context, snapshot *pebble.Snapshot, database, index string, scan indexScan, ids map[string]struct{}, remaining *int) (complete bool, scanErr error) {
-	bounds, prefix := scanBounds(database, index, scan)
-	if bytes.Compare(bounds.LowerBound, bounds.UpperBound) >= 0 {
-		return true, nil
-	}
-	iter, err := snapshot.NewIter(&bounds)
-	if err != nil {
-		return false, wrapStore("creating query index iterator", err)
-	}
-	defer func() {
-		if err := iter.Close(); err != nil {
-			scanErr = errors.Join(scanErr, wrapStore("closing query index iterator", err))
-		}
-	}()
-
-	for valid := iter.First(); valid; valid = iter.Next() {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		// Filtered scans can read the entire string index without buffering nonmatches.
-		if scan.match == nil {
-			if *remaining == 0 {
-				return false, nil
-			}
-			*remaining--
-		}
-		var encoded []byte
-		var id string
-		ok := true
-		if scan.op == cmpEq && !scan.prefix && scan.match == nil {
-			id = string(iter.Key()[len(prefix):])
-		} else {
-			encoded, id, ok = splitIndexEntry(prefix, iter.Key())
-		}
-		if !ok || len(iter.Value()) != 0 || validateID(id) != nil {
-			return false, fmt.Errorf("%w: invalid index entry", errCorruptData)
-		}
-		if scan.match != nil {
-			// Strip the type tag and terminator, then unescape embedded NUL bytes.
-			value := strings.ReplaceAll(string(encoded[1:len(encoded)-2]), "\x00\xff", "\x00")
-			matched, valid := scan.match(ctx, value)
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			if !valid {
-				return false, nil
-			}
-			if !matched {
-				continue
-			}
-		}
-		if _, seen := ids[id]; !seen && len(ids) == maxScanDocs {
-			return false, nil
-		}
-		ids[id] = struct{}{}
-	}
-	if err := iter.Error(); err != nil {
-		return false, wrapStore("iterating query index", err)
-	}
-
-	return true, nil
-}
-
-func scanIndexedDocs(snapshot *pebble.Snapshot, database string, databaseKey []byte, ids []string, scan func(func(context.Context) ([]byte, error)) error) error {
-	return scan(func(ctx context.Context) ([]byte, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if len(ids) == 0 {
-			return nil, nil
-		}
-
-		id := ids[0]
-		ids = ids[1:]
-
-		return readIndexedDoc(snapshot, databaseKey, docKey(database, id), id)
-	})
 }
 
 func readIndexedDoc(snapshot *pebble.Snapshot, databaseKey, key []byte, id string) (body []byte, readErr error) {

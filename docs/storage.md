@@ -87,9 +87,9 @@ A query scans the matching index keys and reads their document IDs. Equality mat
 
 ## jq queries
 
-`QUERY` reads one Pebble snapshot in document-ID order. It decrypts and decodes
-each document body as jq needs it. For supported filters, it scans a secondary
-index and reads only the candidate documents. See [jq queries](query-language.md#secondary-indexes)
+`QUERY` reads one Pebble snapshot. A full scan reads in document-ID order. An
+indexed query reads candidate documents in index order, without sorting them
+by ID. See [jq queries](query-language.md#secondary-indexes)
 for supported filters and comparison limits. Queries do not use cursors.
 
 ## Secondary-index range scans

@@ -11,7 +11,7 @@ curl -i -N -X QUERY http://localhost:8080/db/users \
 
 ## Input and output
 
-KantanDB runs the program on each document body, like `jq` without `-s`. It reads from one Pebble snapshot in document-ID order. The input contains no server IDs or revisions. For example, `.` returns every document and `.skills[]` emits each skill separately. A program can use `input` or `inputs` to consume later documents from the same scan.
+KantanDB runs the program on each document body, like `jq` without `-s`. It reads from one Pebble snapshot. Full scans read in document-ID order. Indexed queries read in index order and can return a different set of documents when you use `limit`. The input contains no server IDs or revisions. For example, `.` returns every document and `.skills[]` emits each skill separately. A program can use `input` or `inputs` to consume later documents from the same scan.
 
 By default, KantanDB buffers all jq outputs in one JSON array. `Accept: application/x-ndjson` streams one compact JSON value per line. An array from jq stays on one line. If jq emits no values, JSON returns `[]` and NDJSON returns an empty body. If `Accept` excludes both formats, KantanDB returns `406 Not Acceptable`.
 
@@ -34,19 +34,11 @@ It also supports these predicates on top-level fields:
 
 A bare indexed filter such as `select(.category == 3)` returns the stored JSON without running jq.
 Indexed equality compares number spellings exactly: `3`, `3.0`, and `3e0` match different values.
-For other indexed queries, KantanDB removes duplicate candidates and runs the original jq program in document-ID order.
-It can merge up to 128 lists of IDs grouped by indexed value as jq requests documents.
-This lets jq stop without reading the remaining IDs.
+For other indexed queries, KantanDB runs the original jq program on documents as it finds them in the index. If a query uses several index scans, KantanDB runs them one at a time and skips documents it already read.
 
 A query such as `limit(10; (., inputs) | (select(.category >= 3) | .name)), halt` can use the same index as its `select` filter.
 The limit applies to outputs, and `halt` ends the scan after the limit.
-For simple integer ranges with a small limit, KantanDB first checks a short prefix in document-ID order.
-If the prefix contains enough matches, KantanDB can skip the index.
-Other uses of `input` or `inputs` still use a full document scan.
-
-If the merge does not apply, KantanDB collects and sorts the candidate IDs before running jq.
-It uses a full document scan if no plan applies or the collector exceeds its 10,000-entry budget.
-The `endswith`, `contains`, and `test` scans can read more entries but still collect at most 10,000 unique IDs.
+KantanDB uses a full scan if no index plan applies. Other uses of `input` or `inputs` also use a full scan.
 
 Range bounds use the stored value type and exact numeric values, regardless of number spelling.
 For example, jq considers `"90000"` greater than `100000`, but the index excludes it from a numeric range.

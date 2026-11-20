@@ -102,7 +102,7 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 	plan := planQuery(query)
 	if selectCall := queryCall(query, "select", 1); selectCall != nil &&
 		ungroup(selectCall.Args[0]).Op == gojq.OpEq && len(plan) == 1 {
-		used, err := s.scanEquality(ctx, database, plan[0], directScan(&directPlan{}, stream, ctx, emit))
+		used, err := s.scanEquality(database, plan[0], directScan(&directPlan{}, stream, ctx, emit))
 		if used || err != nil {
 			return err
 		}
@@ -116,7 +116,7 @@ func (s *store) runQuery(ctx context.Context, database string, program []byte, s
 		return fmt.Errorf("%w: %w", errInvalidQuery, err)
 	}
 
-	return s.scanQuery(ctx, database, plan, func(read func(context.Context) ([]byte, error)) error {
+	return s.scanQuery(database, plan, func(read func(context.Context) ([]byte, error)) error {
 		input.read = read
 		for {
 			done, err := evalQueryDoc(ctx, input, code, stream, emit)

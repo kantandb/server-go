@@ -258,9 +258,11 @@ paths:
       operationId: queryDocuments
       summary: Run a jq program against document bodies
       description: |
-        jq runs on document bodies in document-ID order from one snapshot, like
-        jq without -s. Simple leading select filters can use secondary indexes,
-        including bounded ranges, OR, IN, and string tests.
+        jq runs on document bodies from one snapshot, like jq without -s.
+        Full scans read in document-ID order. Simple leading select filters can
+        use secondary indexes, including bounded ranges, OR, IN, and string tests.
+        Indexed queries read in index order, so a limit can return different
+        documents than a full scan.
         Index bounds can exclude cross-type or rounded numeric matches.
         KantanDB does not return cursors.
         Accept selects buffered JSON (default) or streamed NDJSON.

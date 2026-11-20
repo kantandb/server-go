@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
@@ -62,12 +63,17 @@ func seedRangeBench(b *testing.B, database string, categories int) (*store, [][]
 		b.Fatal(err)
 	}
 
-	// Import does not promise that document IDs sort in input order.
+	// The index sorts by category, then by document ID.
 	order := make([]int, len(ids))
 	for i := range order {
 		order[i] = i
 	}
-	slices.SortFunc(order, func(a, b int) int { return strings.Compare(ids[a], ids[b]) })
+	slices.SortFunc(order, func(a, b int) int {
+		if n := cmp.Compare(a%categories, b%categories); n != 0 {
+			return n
+		}
+		return strings.Compare(ids[a], ids[b])
+	})
 
 	return s, docs, order
 }
@@ -90,7 +96,7 @@ func benchRange(b *testing.B, s *store, database string, docs [][]byte, order []
 		b.Fatal("not enough matching documents")
 	}
 
-	// Check the exact output against ID order before timing.
+	// Check the exact output against index order before timing.
 	n := 0
 	if err := s.runQuery(b.Context(), database, program, true, func(doc []byte) error {
 		if n >= len(want) || !bytes.Equal(doc, want[n]) {

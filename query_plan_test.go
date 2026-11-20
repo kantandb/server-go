@@ -120,16 +120,16 @@ func TestIndexedPredicatesHTTP(t *testing.T) {
 		postQueryDoc(t, server, body)
 	}
 	for _, tt := range []struct{ predicate, want string }{
-		{`.age >= 30 and .age <= 40`, `[1,3,5]`},
+		{`.age >= 30 and .age <= 40`, `[3,5,1]`},
 		{`.age < 40 and .age > 30`, `[5]`},
 		{`.age > 40 and .age <= 30`, `[]`},
 		{`.age < 30 or .age > 40`, `[2,4]`},
 		{`.age >= 40 or .dept == "hr"`, `[1,4,5]`},
 		{`.age < 30 or .active == true`, `[2,5]`},
-		{`.dept | IN("sales", "hr", "hr")`, `[1,3,5]`},
-		{`.name | startswith("A")`, `[1,3,4]`},
+		{`.dept | IN("sales", "hr", "hr")`, `[3,1,5]`},
+		{`.name | startswith("A")`, `[3,1,4]`},
 		{`.name | startswith("A\u0000")`, `[1]`},
-		{`.name | startswith("")`, `[1,2,3,4,5]`},
+		{`.name | startswith("")`, `[3,1,4,2,5]`},
 	} {
 		program := "select(" + tt.predicate + ") | .id"
 		checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", program, queryMediaType), http.StatusOK, tt.want)
@@ -158,10 +158,10 @@ func TestIndexStringFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct{ program, want string }{
-		{`select(.name | endswith("e")) | .id`, `[1,3]`},
+		{`select(.name | endswith("e")) | .id`, `[3,1]`},
 		{`select(.name | contains("\u0000r")) | .id`, `[3]`},
-		{`select(.name | test("^a.*e$"; "i")) | .id`, `[1,3]`},
-		{`select((.name | endswith("e")) or .name == "Anne") | .id`, `[1,3]`},
+		{`select(.name | test("^a.*e$"; "i")) | .id`, `[3,1]`},
+		{`select((.name | endswith("e")) or .name == "Anne") | .id`, `[3,1]`},
 		{`select(.name | test("^Z")) | .id`, `[]`},
 	} {
 		result, err := s.queryArray(t.Context(), "users", []byte(tt.program))
@@ -171,7 +171,7 @@ func TestIndexStringFilters(t *testing.T) {
 	}
 }
 
-func TestLimitedIndexMerge(t *testing.T) {
+func TestLimitedIndexScan(t *testing.T) {
 	t.Parallel()
 
 	s := testStore(t)
@@ -193,40 +193,41 @@ func TestLimitedIndexMerge(t *testing.T) {
 	}
 
 	const program = `limit(3; (., inputs) | (select(.category >= 3 or .category == 4) | .id)), halt`
-	check := func(program string) {
+	check := func(program, want string) {
 		t.Helper()
 		got, err := s.queryArray(t.Context(), "users", []byte(program))
-		if err != nil || string(got) != `[1,3,5]` {
-			t.Fatalf("%s = %s, %v; want [1,3,5]", program, got, err)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %s, %v; want %s", program, got, err, want)
 		}
 	}
-	check(program)
-	check("(" + program + ")")
+	check(program, `[3,6,7]`)
+	check("("+program+")", `[1,3,5]`)
 
-	// A full scan would read document 2. An eager index scan would read the entry for document 7.
+	// The index scan skips document 2 and stops before the entry for document 5.
 	if err := s.db.Set(docKey("users", indexTestIDB), []byte("bad record"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
-	value, err := encodeIndexValue(json.Number("3"))
+	value, err := encodeIndexValue(json.Number("5"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.Set(indexKey("users", "category", value, indexTestIDG), []byte("bad entry"), pebble.Sync); err != nil {
+	if err := s.db.Set(indexKey("users", "category", value, indexTestIDE), []byte("bad entry"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
-	check(program)
+	check(program, `[3,6,7]`)
 }
 
-func TestLimitedIndexMergeFallback(t *testing.T) {
+func TestWideIndexRange(t *testing.T) {
 	t.Parallel()
 
 	s := testStore(t)
 	if err := s.createDB("users", indexDef{name: "category", path: "/category"}); err != nil {
 		t.Fatal(err)
 	}
-	for i := range maxMergeLists + 1 {
+	const categories = 256
+	for i := range categories {
 		id := fmt.Sprintf("01950000-0000-7000-8000-%012d", i)
-		body := fmt.Appendf(nil, `{"category":%d,"id":%d}`, maxMergeLists-i, i)
+		body := fmt.Appendf(nil, `{"category":%d,"id":%d}`, categories-1-i, i)
 		if _, err := s.createDocWithID("users", id, body); err != nil {
 			t.Fatal(err)
 		}
@@ -234,8 +235,8 @@ func TestLimitedIndexMergeFallback(t *testing.T) {
 
 	const program = `limit(3; (., inputs) | (select(.category >= 0) | .id)), halt`
 	got, err := s.queryArray(t.Context(), "users", []byte(program))
-	if err != nil || string(got) != `[0,1,2]` {
-		t.Fatalf("query = %s, %v; want [0,1,2]", got, err)
+	if err != nil || string(got) != `[255,254,253]` {
+		t.Fatalf("query = %s, %v; want [255,254,253]", got, err)
 	}
 }
 
@@ -291,9 +292,9 @@ func TestIndexedQueryHTTP(t *testing.T) {
 	}
 
 	const query = `select(.salary > 100000) | .name`
-	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", query, queryMediaType), http.StatusOK, `["Ana","Cara"]`)
+	checkResponse(t, sendRequest(t, server, queryMethod, "/db/users", query, queryMediaType), http.StatusOK, `["Cara","Ana"]`)
 	res := sendNDJSONQuery(t, server, "/db/users", query)
-	checkResponse(t, res, http.StatusOK, "\"Ana\"\n\"Cara\"\n")
+	checkResponse(t, res, http.StatusOK, "\"Cara\"\n\"Ana\"\n")
 	if got := res.Trailer.Get(queryStatus); got != "ok" {
 		t.Errorf("Query-Status = %q, want ok", got)
 	}
