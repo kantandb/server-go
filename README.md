@@ -38,8 +38,8 @@ xh GET localhost:8080/healthz
 xh POST localhost:8080/db name=example \
   indices:='[{"name":"email","path":"/email"},{"name":"age","path":"/age"}]'
 
-# List databases, optionally after a cursor.
-xh GET localhost:8080/db limit==100 cursor==example
+# List databases, optionally after a cursor. The response Cursor identifies the next page.
+xh GET localhost:8080/db Limit:100 Cursor:example
 
 # Create a document.
 xh POST localhost:8080/db/example name=KantanDB \
@@ -96,7 +96,10 @@ the source document's ETag. By default, results form a JSON array. Set
 `Accept: application/x-ndjson` to stream one result per line. A final
 `Query-Status: ok` trailer confirms the stream finished.
 
-Queries do not return cursors.
+Set `Limit: 100` to paginate supported single-output queries, up to 1,000 results per page.
+Send the returned `Cursor` with the same query to request the next page.
+JSON returns the cursor in a response header. NDJSON returns it in a trailer.
+Requests without `Limit` or `Cursor` remain unpaginated.
 Restrict access to trusted clients. See the [query guide](docs/query-language.md)
 for limits and examples.
 

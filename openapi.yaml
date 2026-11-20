@@ -59,12 +59,18 @@ paths:
       tags: [Databases]
       operationId: listDatabases
       summary: List databases
+      description: Use Limit and Cursor headers for pagination. The default limit is 100. URI query parameters are rejected.
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/DatabaseCursor"
       responses:
         "200":
           description: Database names in ascending order.
+          headers:
+            Cursor:
+              description: Last returned database name when another page exists. Absent on the final page.
+              schema:
+                $ref: "#/components/schemas/Name"
           content:
             application/json:
               schema:
@@ -73,7 +79,7 @@ paths:
                 databases: [accounts, users]
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: The limit or cursor is invalid.
+          description: The Limit or Cursor header is invalid, or URI query parameters are present.
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -266,7 +272,10 @@ paths:
         Indexed queries read in index order, so a limit can return different
         documents than a full scan.
         Index bounds can exclude cross-type or rounded numeric matches.
-        KantanDB does not return cursors.
+        Limit or Cursor headers enable pagination for supported single-output queries.
+        Requests without either header remain unpaginated. Multiple index scans,
+        input, inputs, multi-output programs, and function definitions reject pagination.
+        Each page reads a new snapshot, so concurrent writes can cause omissions or repeats.
         Accept selects buffered JSON (default) or streamed NDJSON.
         For NDJSON, require the final Query-Status: ok trailer to confirm completion.
         Errors before streaming use an HTTP error status and a JSON body.
@@ -276,6 +285,21 @@ paths:
       externalDocs:
         description: Query language
         url: docs/query-language.md
+      parameters:
+        - name: Limit
+          in: header
+          description: Maximum results per page. Cursor without Limit uses 100. Omit both headers to disable pagination.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+        - name: Cursor
+          in: header
+          description: Opaque continuation token for the exact same query text and database.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 16384
       requestBody:
         required: true
         content:
@@ -286,8 +310,12 @@ paths:
             example: select(.age >= 18) | .name
       responses:
         "200":
-          description: Results with source IDs, ETags, and jq outputs, as a JSON array or one wrapper per line.
+          description: Results as a JSON array or one wrapper per line. NDJSON returns pagination metadata in trailers.
           headers:
+            Cursor:
+              description: Next-page token for JSON, or a trailer for NDJSON. Absent when complete. Require Query-Status ok for NDJSON.
+              schema:
+                type: string
             Accept-Query:
               $ref: "#/components/headers/AcceptQuery"
             Cache-Control:
@@ -317,7 +345,7 @@ paths:
                 {"id":"01950000-0000-7000-8000-000000000001","rev":"\"0123456789abcdef0123456789abcdef\"","doc":"Alice"}
         "400":
           $ref: "#/components/responses/BadRequest"
-          description: The database name or program is invalid, or the program failed.
+          description: Invalid database, query, Limit, or Cursor, an unsupported paginated query, or a query execution failure.
         "404":
           $ref: "#/components/responses/NotFound"
           description: The database does not exist.
@@ -725,8 +753,8 @@ components:
         $ref: "#/components/schemas/DocumentID"
 
     Limit:
-      name: limit
-      in: query
+      name: Limit
+      in: header
       description: Maximum number of results.
       schema:
         type: integer
@@ -735,9 +763,9 @@ components:
         default: 100
 
     DatabaseCursor:
-      name: cursor
-      in: query
-      description: Database name returned as the previous page position.
+      name: Cursor
+      in: header
+      description: Database name from the previous response Cursor header. Resume strictly after this name.
       schema:
         $ref: "#/components/schemas/Name"
 

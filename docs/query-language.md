@@ -48,6 +48,40 @@ Decimal rounding in jq can also cause the index to miss matches.
 Indexed string tests skip missing and non-string fields, which can raise errors in a full document scan.
 To force a full scan, wrap the entire program in parentheses: `(select(.salary > 100000) | .name)`.
 
+## Pagination
+
+Send `Limit: 100` to request a page of up to 100 results. Valid limits range from 1 to 1,000.
+Requests without `Limit` or `Cursor` remain unpaginated. A request with only `Cursor` uses a limit of 100.
+The limit counts outputs, not the documents that the filter examines.
+
+For JSON, the response `Cursor` header contains the token for the next page.
+For NDJSON, the response announces a `Cursor` trailer. Read the complete body and require `Query-Status: ok` before using that token.
+If the cursor is absent after successful completion, there are no more results.
+The server evaluates one extra matching result to detect another page, without returning that result.
+A failed page returns no cursor.
+
+Send the token in the `Cursor` request header with the exact same query text and database.
+You can change `Limit` or the response format between pages.
+Tokens are encrypted and authenticated and bind to the query, scan plan, index definitions, and database generation.
+A changed query, incompatible index change, or database recreation invalidates the token. Restarting the server does not invalidate it.
+
+Pagination accepts a conservative set of programs that produce at most one result per document:
+
+- Identity, field access, literals, parentheses, and pipes.
+- Comparisons, `and`, `or`, and `select` with supported expressions.
+- Array and object construction, such as `[.name, .age]` and `{name: .name, age: .age}`.
+- `startswith`, `endswith`, `contains`, `test`, `IN`, `length`, `type`, `not`, `ascii_downcase`, and `ascii_upcase` with supported arguments.
+
+Programs such as `.skills[]`, `.name, .age`, `input`, `inputs`, and function definitions reject pagination.
+Queries requiring multiple index scans, such as indexed OR or multi-value IN, also reject pagination.
+Unsupported programs return `400` with `query_not_pageable`. Invalid limits or cursors return `invalid_limit` or `invalid_cursor`.
+Unpaginated queries retain their existing behavior.
+
+A cursor records a storage key, not a result offset. The next page seeks directly past that key.
+Indexed pages preserve index order, including document IDs as tie-breakers for equal values.
+Each request reads a new snapshot. Concurrent writes can cause omissions or repeated results, especially when indexed values change.
+Existing evaluation limits still apply to each request. Sparse filters can require substantial scanning to fill a page.
+
 ## Stream completion
 
 The server sends the first NDJSON line immediately and groups later lines into batches of up to 32 KiB. It sends larger lines on their own. NDJSON responses announce `Trailer: Query-Status`. Read the body to the end and check the trailer. `Query-Status: ok` confirms completion. `Query-Status: error` means the stream failed and can contain partial results. If a proxy or client drops the trailer, treat completion as unconfirmed. If the query fails before streaming starts, KantanDB returns an HTTP error with a JSON body.
@@ -56,4 +90,4 @@ The server sends the first NDJSON line immediately and groups later lines into b
 
 The program can contain up to 64 KiB of source, subject to the server request limit. JSON mode allows up to 10,000 input documents, 64 MiB of input, 8 MiB of output, and five seconds for the query. NDJSON has no total count or byte limit. It has a five-second deadline for each document evaluation and each write.
 
-Restrict QUERY to trusted clients. Deadlines do not cap allocations. For example, `[., inputs]` collects all remaining documents in memory. KantanDB uses [gojq](https://github.com/itchyny/gojq#difference-to-jq) and does not expose local modules or environment variables. QUERY does not accept URI query parameters or return cursors.
+Restrict QUERY to trusted clients. Deadlines do not cap allocations. For example, `[., inputs]` collects all remaining documents in memory. KantanDB uses [gojq](https://github.com/itchyny/gojq#difference-to-jq) and does not expose local modules or environment variables. QUERY does not accept URI query parameters. Use headers for pagination.

@@ -295,7 +295,7 @@ func (s *store) createDocWithID(database, id string, json []byte) (rev revision,
 
 func (s *store) scanDocs(database string, scan func(func(context.Context) (*queryDocument, error)) error) error {
 	return s.withDocSnapshot(database, func(snapshot *pebble.Snapshot, databaseKey []byte) error {
-		return scanDocSnapshot(snapshot, database, databaseKey, scan)
+		return scanDocSnapshot(snapshot, database, databaseKey, nil, scan)
 	})
 }
 
@@ -320,7 +320,7 @@ func (s *store) withDocSnapshot(database string, use func(*pebble.Snapshot, []by
 	return use(snapshot, databaseKey)
 }
 
-func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []byte, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
+func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []byte, page *queryPage, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
 	prefix := docsPrefix(database)
 	iter, err := snapshot.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
@@ -340,7 +340,7 @@ func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []b
 
 		var valid bool
 		if first {
-			valid = iter.First()
+			valid = pageSeek(iter, page)
 			first = false
 		} else {
 			valid = iter.Next()
@@ -353,6 +353,9 @@ func scanDocSnapshot(snapshot *pebble.Snapshot, database string, databaseKey []b
 			return nil, nil
 		}
 
+		if page != nil {
+			page.current = append(page.current[:0], iter.Key()...)
+		}
 		id := string(iter.Key()[len(prefix):])
 		if err := validateID(id); err != nil {
 			return nil, fmt.Errorf("%w: invalid document key", errCorruptData)

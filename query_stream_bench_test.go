@@ -38,7 +38,7 @@ func BenchmarkBulkExport(b *testing.B) {
 	for _, tc := range []struct{ name, program string }{{"jq", "(.)"}, {"direct", "."}} {
 		b.Run(tc.name, func(b *testing.B) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.streamQuery(w, r, database, []byte(tc.program))
+				a.streamQuery(w, r, database, []byte(tc.program), nil)
 			}))
 			b.Cleanup(server.Close)
 

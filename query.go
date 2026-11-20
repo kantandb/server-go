@@ -90,12 +90,20 @@ func (in *queryInput) readBody(ctx context.Context) (*queryDocument, error) {
 }
 
 func (s *store) runQuery(ctx context.Context, database string, program []byte, stream bool, emit func([]byte) error) error {
+	return s.runQueryPage(ctx, database, program, stream, nil, emit)
+}
+
+func (s *store) runQueryPage(ctx context.Context, database string, program []byte, stream bool, page *queryPage, emit func([]byte) error) error {
 	if !utf8.Valid(program) || len(bytes.TrimSpace(program)) == 0 {
 		return errInvalidQuery
 	}
 	query, err := gojq.Parse(string(program))
 	if err != nil {
 		return fmt.Errorf("%w: %w", errInvalidQuery, err)
+	}
+
+	if page != nil {
+		return s.runPage(ctx, database, program, query, stream, page, emit)
 	}
 
 	if direct := planDirect(query); direct != nil {
@@ -182,8 +190,12 @@ func runQueryDoc(input *queryInput, code *gojq.Code, emit func([]byte) error) (b
 }
 
 func (s *store) queryArray(ctx context.Context, database string, program []byte) ([]byte, error) {
+	return s.queryArrayPage(ctx, database, program, nil)
+}
+
+func (s *store) queryArrayPage(ctx context.Context, database string, program []byte, page *queryPage) ([]byte, error) {
 	body := []byte{'['}
-	err := s.runQuery(ctx, database, program, false, func(value []byte) error {
+	err := s.runQueryPage(ctx, database, program, false, page, func(value []byte) error {
 		if len(body) > 1 {
 			body = append(body, ',')
 		}

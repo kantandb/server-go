@@ -10,7 +10,7 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan queryPlan, names map[string]string, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
+func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan queryPlan, names map[string]string, page *queryPage, scan func(func(context.Context) (*queryDocument, error)) error) (scanErr error) {
 	var iter *pebble.Iterator
 	closeIter := func() error {
 		if iter == nil {
@@ -58,7 +58,7 @@ func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan 
 					return nil, wrapStore("opening query index iterator", err)
 				}
 				prefix = keyPrefix
-				valid = iter.First()
+				valid = pageSeek(iter, page)
 			} else {
 				valid = iter.Next()
 			}
@@ -86,6 +86,9 @@ func scanIndexDocs(snapshot *pebble.Snapshot, database string, key []byte, plan 
 				seen[id] = struct{}{}
 			}
 
+			if page != nil {
+				page.current = append(page.current[:0], iter.Key()...)
+			}
 			return readIndexedDoc(snapshot, key, docKey(database, id), id)
 		}
 	})

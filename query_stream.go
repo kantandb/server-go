@@ -11,12 +11,15 @@ const (
 	queryBufferSize = 32 << 10
 )
 
-func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database string, program []byte) {
+func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database string, program []byte, page *queryPage) {
 	controller := http.NewResponseController(w)
 	started, complete := false, false
 	start := func() {
 		w.Header().Set("Content-Type", queryNDJSON)
 		w.Header().Add("Trailer", queryStatus)
+		if page != nil {
+			w.Header().Add("Trailer", "Cursor")
+		}
 		w.WriteHeader(http.StatusOK)
 		started = true
 	}
@@ -85,7 +88,7 @@ func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database strin
 		return nil
 	}
 
-	err := a.store.runQuery(r.Context(), database, program, true, emit)
+	err := a.store.runQueryPage(r.Context(), database, program, true, page, emit)
 	// Keep values emitted before a query error.
 	if flushErr := flush(); flushErr != nil {
 		err = errors.Join(err, flushErr)
@@ -101,6 +104,9 @@ func (a *api) streamQuery(w http.ResponseWriter, r *http.Request, database strin
 	}
 	if !started {
 		start()
+	}
+	if page != nil && page.next != "" {
+		w.Header().Set("Cursor", page.next)
 	}
 	complete = true
 }

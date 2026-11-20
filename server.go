@@ -10,7 +10,6 @@ import (
 	"mime"
 	"net/http"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -327,16 +326,37 @@ func (a *api) createDB(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) listDBs(w http.ResponseWriter, r *http.Request) {
-	limit, cursor, ok := parseListQuery(w, r, validateName)
-	if !ok {
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "URI query parameters are not supported")
+
+		return
+	}
+	page, err := parseQueryPage(r.Header)
+	if err != nil {
+		a.failQuery(w, r, err)
+
+		return
+	}
+	limit, cursor := defaultListLimit, ""
+	if page != nil {
+		limit, cursor = page.limit, page.cursor
+	}
+	if cursor != "" && validateName(cursor) != nil {
+		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+
 		return
 	}
 
-	names, err := a.store.listDBs(limit, cursor)
+	// Read one extra name to detect another page without changing the body.
+	names, err := a.store.listDBs(limit+1, cursor)
 	if err != nil {
 		a.fail(w, r, "list databases", err)
 
 		return
+	}
+	if len(names) > limit {
+		w.Header().Set("Cursor", names[limit-1])
+		names = names[:limit]
 	}
 	if names == nil {
 		names = []string{}
@@ -422,8 +442,15 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	page, err := parseQueryPage(r.Header)
+	if err != nil {
+		a.failQuery(w, r, err)
+
+		return
+	}
+
 	if responseType == queryNDJSON {
-		a.streamQuery(w, r, database, body)
+		a.streamQuery(w, r, database, body, page)
 
 		return
 	}
@@ -431,17 +458,26 @@ func (a *api) queryDocs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
 	defer cancel()
 
-	result, err := a.store.queryArray(ctx, database, body)
+	result, err := a.store.queryArrayPage(ctx, database, body, page)
 	if err != nil {
 		a.failQuery(w, r, err)
 
 		return
+	}
+	if page != nil && page.next != "" {
+		w.Header().Set("Cursor", page.next)
 	}
 	writeData(w, http.StatusOK, queryJSON+"; charset=utf-8", result)
 }
 
 func (a *api) failQuery(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, errQueryCursor):
+		writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
+	case errors.Is(err, errPageLimit):
+		writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
+	case errors.Is(err, errQueryPage):
+		writeError(w, http.StatusBadRequest, "query_not_pageable", "Pagination requires a supported single-output query and at most one index scan")
 	case errors.Is(err, errInvalidQuery):
 		writeError(w, http.StatusBadRequest, "invalid_query", "Query is invalid")
 	case errors.Is(err, errQueryRuntime):
@@ -457,30 +493,6 @@ func (a *api) failQuery(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		a.fail(w, r, "query documents", err)
 	}
-}
-
-func parseListQuery(w http.ResponseWriter, r *http.Request, validateCursor func(string) error) (int, string, bool) {
-	limit := defaultListLimit
-	if values, ok := r.URL.Query()["limit"]; ok {
-		parsed, err := strconv.Atoi(values[0])
-		if err != nil || parsed < 1 || parsed > maxListLimit {
-			writeError(w, http.StatusBadRequest, "invalid_limit", "Limit must be between 1 and 1000")
-
-			return 0, "", false
-		}
-		limit = parsed
-	}
-
-	cursor := r.URL.Query().Get("cursor")
-	if cursor != "" {
-		if err := validateCursor(cursor); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_cursor", "Cursor is invalid")
-
-			return 0, "", false
-		}
-	}
-
-	return limit, cursor, true
 }
 
 func (a *api) deleteDB(w http.ResponseWriter, r *http.Request) {

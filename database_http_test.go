@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -82,14 +84,59 @@ func TestListDatabasesPaginationHTTP(t *testing.T) {
 		checkResponse(t, res, http.StatusCreated, `{"name":"`+name+`"}`)
 	}
 
-	res := sendRequest(t, server, http.MethodGet, "/db?limit=2", "", "")
+	res := sendDBList(t, server, "/db", http.Header{"Limit": {"2"}})
+	cursor := res.Header.Get("Cursor")
+	if cursor != "beta" {
+		t.Fatalf("Cursor = %q, want beta", cursor)
+	}
 	checkResponse(t, res, http.StatusOK, `{"databases":["alpha","beta"]}`)
 
-	res = sendRequest(t, server, http.MethodGet, "/db?limit=1&cursor=beta", "", "")
+	res = sendDBList(t, server, "/db", http.Header{"Limit": {"1"}, "Cursor": {cursor}})
+	if got := res.Header.Get("Cursor"); got != "" {
+		t.Fatalf("final page Cursor = %q, want empty", got)
+	}
 	checkResponse(t, res, http.StatusOK, `{"databases":["gamma"]}`)
 
-	res = sendRequest(t, server, http.MethodGet, "/db?cursor=gamma", "", "")
+	res = sendDBList(t, server, "/db", http.Header{"Cursor": {"gamma"}})
+	if got := res.Header.Get("Cursor"); got != "" {
+		t.Fatalf("empty page Cursor = %q, want empty", got)
+	}
 	checkResponse(t, res, http.StatusOK, `{"databases":[]}`)
+
+	// Seeking after a deleted cursor still reaches the next database.
+	checkResponse(t, sendRequest(t, server, http.MethodDelete, "/db/beta", "", ""), http.StatusNoContent, "")
+	res = sendDBList(t, server, "/db", http.Header{"Cursor": {cursor}})
+	checkResponse(t, res, http.StatusOK, `{"databases":["gamma"]}`)
+}
+
+func TestListDBHeaderDefaultsHTTP(t *testing.T) {
+	t.Parallel()
+
+	store, server := newBulkTestServer(t, defaultMaxBodyBytes, defaultBulkConfig())
+	for i := range 101 {
+		if err := store.createDB(fmt.Sprintf("db%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		headers http.Header
+		count   int
+		cursor  string
+	}{
+		{count: 100, cursor: "db099"},
+		{headers: http.Header{"Cursor": {"db099"}}, count: 1},
+		{headers: http.Header{"Limit": {"1000"}}, count: 101},
+	} {
+		res := sendDBList(t, server, "/db", tc.headers)
+		body := readResponse(t, res)
+		var result dbList
+		if err := json.Unmarshal([]byte(body), &result); err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != http.StatusOK || len(result.Databases) != tc.count || res.Header.Get("Cursor") != tc.cursor {
+			t.Fatalf("headers %v: status %d, count %d, Cursor %q", tc.headers, res.StatusCode, len(result.Databases), res.Header.Get("Cursor"))
+		}
+	}
 }
 
 func TestListDatabasesValidationHTTP(t *testing.T) {
@@ -97,17 +144,25 @@ func TestListDatabasesValidationHTTP(t *testing.T) {
 
 	server := newTestServer(t, defaultMaxBodyBytes)
 	tests := []struct {
-		path string
-		code string
+		path    string
+		headers http.Header
+		code    string
 	}{
-		{path: "/db?limit=", code: "invalid_limit"},
-		{path: "/db?limit=0", code: "invalid_limit"},
-		{path: "/db?limit=1001", code: "invalid_limit"},
-		{path: "/db?limit=none", code: "invalid_limit"},
-		{path: "/db?cursor=Bad", code: "invalid_cursor"},
+		{path: "/db", headers: http.Header{"Limit": {""}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Limit": {"0"}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Limit": {"1001"}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Limit": {"none"}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Limit": {"1", "2"}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Limit": {"1, 2"}}, code: "invalid_limit"},
+		{path: "/db", headers: http.Header{"Cursor": {"Bad"}}, code: "invalid_cursor"},
+		{path: "/db", headers: http.Header{"Cursor": {""}}, code: "invalid_cursor"},
+		{path: "/db", headers: http.Header{"Cursor": {"alpha", "beta"}}, code: "invalid_cursor"},
+		{path: "/db?limit=2", code: "invalid_query"},
+		{path: "/db?cursor=alpha", code: "invalid_query"},
+		{path: "/db?other=1", code: "invalid_query"},
 	}
 	for _, tt := range tests {
-		res := sendRequest(t, server, http.MethodGet, tt.path, "", "")
+		res := sendDBList(t, server, tt.path, tt.headers)
 		body := readResponse(t, res)
 		if res.StatusCode != http.StatusBadRequest {
 			t.Errorf("GET %s status = %d, want %d; body = %s", tt.path, res.StatusCode, http.StatusBadRequest, body)
@@ -116,6 +171,22 @@ func TestListDatabasesValidationHTTP(t *testing.T) {
 			t.Errorf("GET %s body = %s, want code %q", tt.path, body, tt.code)
 		}
 	}
+}
+
+func sendDBList(t *testing.T, server *httptest.Server, path string, headers http.Header) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header = headers
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return res
 }
 
 func TestCreateDatabaseValidationHTTP(t *testing.T) {

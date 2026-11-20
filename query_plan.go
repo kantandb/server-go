@@ -352,7 +352,7 @@ func (s *store) scanEquality(database string, part indexScan, scan func(func(con
 		}
 
 		used = true
-		return scanIndexDocs(snapshot, database, key, plan, names, scan)
+		return scanIndexDocs(snapshot, database, key, plan, names, nil, scan)
 	})
 
 	return used, err
@@ -367,12 +367,12 @@ func (s *store) scanQuery(database string, plan queryPlan, scan func(func(contex
 			}
 			names := planIndexNames(plan, defs)
 			if names == nil {
-				return scanDocSnapshot(snapshot, database, databaseKey, scan)
+				return scanDocSnapshot(snapshot, database, databaseKey, nil, scan)
 			}
-			return scanIndexDocs(snapshot, database, databaseKey, plan, names, scan)
+			return scanIndexDocs(snapshot, database, databaseKey, plan, names, nil, scan)
 		}
 
-		return scanDocSnapshot(snapshot, database, databaseKey, scan)
+		return scanDocSnapshot(snapshot, database, databaseKey, nil, scan)
 	})
 }
 
